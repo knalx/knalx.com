@@ -1,9 +1,15 @@
 h1.center {    
     text-align: center;
-    color: #F6F8FF;    
+    color: #DAE2DF;    
     font-size: 300%;
+    font-family: 'Lucida Sans', 'Lucida Sans Regular', 'Lucida Grande', 'Lucida Sans Unicode', Geneva, Verdana, sans-serif
 }
 
-body {
-    background-color: #172121;
+body {    
+    width: 100vw;
+    height: 100vh;
+    background: linear-gradient(30deg, #282A29, #2C363F);        
+    display: flex;
+    align-items: top;
+    justify-content: center;     
 }
