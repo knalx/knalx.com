@@ -1,2 +1,0 @@
-# knalx.com
-My CV
