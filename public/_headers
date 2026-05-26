@@ -13,6 +13,10 @@
 /*.js
   Cache-Control: public, max-age=86400
 
+/*.frag
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=86400
+
 /favicon.svg
   Cache-Control: public, max-age=604800
 
