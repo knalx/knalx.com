@@ -71,11 +71,10 @@
   const uRes = gl.getUniformLocation(prog, "u_res");
   const uTime = gl.getUniformLocation(prog, "u_time");
   const uMouse = gl.getUniformLocation(prog, "u_mouse");
-  const uColA = gl.getUniformLocation(prog, "u_colA");
-  const uColB = gl.getUniformLocation(prog, "u_colB");
   const uBg = gl.getUniformLocation(prog, "u_bg");
 
-  // Pull colors from CSS custom properties so the shader follows the theme.
+  // Pull background color from the CSS custom property so the shader
+  // follows the theme.
   function readColor(name, fallback) {
     const v = getComputedStyle(document.documentElement)
       .getPropertyValue(name)
@@ -108,8 +107,6 @@
   }
 
   function refreshColors() {
-    gl.uniform3fv(uColA, readColor("--accent-a", [1.0, 0.36, 0.23]));
-    gl.uniform3fv(uColB, readColor("--accent-b", [0.42, 0.36, 0.91]));
     gl.uniform3fv(uBg, readColor("--bg", [0.043, 0.051, 0.071]));
   }
   refreshColors();
@@ -159,8 +156,8 @@
   function frame(now) {
     if (!running) return;
     const t = (now - t0) / 1000;
-    mouse.x += (mouse.tx - mouse.x) * 0.06;
-    mouse.y += (mouse.ty - mouse.y) * 0.06;
+    mouse.x += (mouse.tx - mouse.x) * 0.035;
+    mouse.y += (mouse.ty - mouse.y) * 0.035;
     gl.uniform1f(uTime, t);
     gl.uniform2f(uMouse, mouse.x, mouse.y);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
