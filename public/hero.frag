@@ -8,170 +8,252 @@ uniform float u_time;
 uniform vec2  u_mouse;   // 0..1 in viewport space
 uniform vec3  u_bg;
 
-float hash(vec2 p) {
+// -------- hashing & noise --------
+
+float hash11(float n) {
+    return fract(sin(n) * 43758.5453123);
+}
+
+float hash21(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
     p += dot(p, p + 45.32);
     return fract(p.x * p.y);
 }
 
-// 3D ribbon centerline (vertical component): a slow wandering spine.
-float spine(float x, float t) {
-    return  0.260 * sin(x * 0.32 + t * 0.110)
-          + 0.135 * sin(x * 0.78 - t * 0.075 + 1.7)
-          + 0.060 * sin(x * 1.70 + t * 0.160 + 0.4)
-          + 0.025 * sin(x * 3.00 - t * 0.215);
+float vnoise1(float x) {
+    float i = floor(x);
+    float f = fract(x);
+    float u = f * f * (3.0 - 2.0 * f);
+    return mix(hash11(i), hash11(i + 1.0), u);
 }
 
-// Twist angle around the ribbon's tangent: rotates the width direction
-// from in-screen (theta=0) to depth-axis (theta=pi/2), so stripes
-// physically rotate through 3D space as they flow. Amplitudes sum to
-// ~1.15 rad (66°) — kept below pi/2 so the ribbon never fully goes
-// edge-on (which would collapse all stripes onto the centerline).
-float twistAngle(float x, float t) {
-    return  0.70 * sin(x * 0.19 + t * 0.12)
-          + 0.30 * sin(x * 0.48 - t * 0.18 + 1.7)
-          + 0.15 * sin(x * 1.00 + t * 0.07);
+float fbm1(float x) {
+    float s = 0.0, a = 0.5, f = 1.0;
+    for (int i = 0; i < 5; i++) {
+        s += a * vnoise1(x * f);
+        f *= 2.07;
+        a *= 0.5;
+    }
+    return s;
 }
 
-const int N_HALF = 16;     // 33 stripes total
+float vnoise2(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float fbm2(vec2 p) {
+    float s = 0.0, a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        s += a * vnoise2(p);
+        p *= 2.03;
+        a *= 0.5;
+    }
+    return s;
+}
+
+// -------- aurora colour ramp (cyan -> violet -> magenta) --------
+
+vec3 auroraRamp(float alt) {
+    vec3 cyan    = vec3(0.20, 0.85, 1.00);
+    vec3 violet  = vec3(0.55, 0.20, 0.90);
+    vec3 magenta = vec3(1.00, 0.30, 0.75);
+    vec3 c = mix(cyan,   violet,  smoothstep(0.00, 0.45, alt));
+    c     = mix(c,       magenta, smoothstep(0.35, 1.00, alt));
+    return c;
+}
+
+// One aurora curtain. Returns premultiplied emissive colour.
+vec3 curtain(vec2 p, float t, int idx) {
+    float seed = float(idx) * 17.31;
+
+    // Slow horizontal drift of the entire curtain.
+    float drift = t * (0.030 + 0.020 * hash11(seed + 0.7));
+
+    // The bottom edge of the curtain wanders horizontally.
+    float spineX = p.x * (0.55 + 0.30 * hash11(seed + 2.1)) + drift + seed;
+    float bottomY = -0.30
+                  + (hash11(seed + 0.5) - 0.5) * 0.65
+                  + 0.22 * sin(spineX * 0.9 + t * 0.18 + seed)
+                  + 0.14 * fbm1(spineX * 1.6 + t * 0.22);
+
+    float alt = p.y - bottomY;
+
+    // Horizontal feather: each curtain only emits over part of the screen,
+    // with soft edges.
+    float widthCenter = (hash11(seed + 4.4) - 0.5) * 2.6;
+    float widthSize   = 0.90 + 0.70 * hash11(seed + 5.5);
+    float dx          = (p.x - widthCenter) / widthSize;
+    float horizFeather = exp(-dx * dx * 1.3);
+
+    // Vertical envelope: hot at bottom edge, fades upward.
+    float fadeTop  = 0.70 + 0.25 * hash11(seed + 3.7);
+    float bottomFade = smoothstep(-0.04, 0.04, alt);
+    float topFade    = 1.0 - smoothstep(0.0, fadeTop, alt);
+    float vertical   = bottomFade * topFade;
+
+    // Vertical streaks — anisotropic FBM gives the silky, fibrous look.
+    float streak = fbm2(vec2(p.x * 7.5 + t * 0.04 + seed,
+                              alt * 1.6 - t * 0.07));
+    streak = mix(0.55, 1.20, streak);
+
+    // Bright thin edge line right at the bottom of the curtain.
+    float hotline = smoothstep(0.05, 0.0, abs(alt - 0.005)) * 0.55;
+
+    float intensity = vertical * streak + hotline;
+    intensity *= horizFeather;
+
+    if (intensity <= 0.0) return vec3(0.0);
+
+    vec3 col = auroraRamp(clamp(alt / fadeTop, 0.0, 1.0));
+    return col * intensity;
+}
+
+// -------- starfield --------
+// Three layers of decreasing density and increasing size:
+//   1. fine pinpoints — sharp, static
+//   2. midweight stars with small halo — only ~22% twinkle gently
+//   3. rare hero stars with soft glow — slow individual pulse
+// Disks are AA'd with fwidth so they read as crisp points, not blurry
+// blobs or sub-pixel squares. Jitter is kept small enough that the star
+// always fits inside its cell (no edge clipping).
+vec3 stars(vec2 p, float t) {
+    vec3 acc = vec3(0.0);
+    float aaP = fwidth(p.x);              // pixel size in p-space
+
+    // L1 — sharp pinpoints (~0.5–1.1 px).
+    {
+        const float DEN = 40.0;
+        vec2 g = p * DEN;
+        vec2 i = floor(g);
+        vec2 f = fract(g) - 0.5;
+        float h = hash21(i);
+        if (h > 0.981) {
+            float t01 = (h - 0.981) / 0.019;
+            vec2 jit = (vec2(hash21(i + 13.0), hash21(i + 71.0)) - 0.5) * 0.55;
+            float d  = length(f - jit);
+            float r  = mix(0.020, 0.040, t01);
+            float aa = aaP * DEN;
+            float disk = 1.0 - smoothstep(max(0.0, r - aa), r + aa, d);
+            vec3 tint = mix(vec3(0.80, 0.88, 1.00),
+                            vec3(1.00, 0.95, 0.82),
+                            hash21(i + 5.0));
+            acc += tint * disk;
+        }
+    }
+
+    // L2 — midweight + tiny halo; rare twinklers (~1–2 px).
+    {
+        const float DEN = 26.0;
+        vec2 g = p * DEN + vec2(3.7, 17.3);
+        vec2 i = floor(g);
+        vec2 f = fract(g) - 0.5;
+        float h = hash21(i);
+        if (h > 0.981) {
+            float t01 = (h - 0.981) / 0.019;
+            vec2 jit = (vec2(hash21(i + 5.0), hash21(i + 19.0)) - 0.5) * 0.45;
+            vec2 ff  = f - jit;
+            float d  = length(ff);
+            float r  = mix(0.025, 0.050, t01);
+            float aa = aaP * DEN;
+            float disk = 1.0 - smoothstep(max(0.0, r - aa), r + aa, d);
+            float halo = (1.0 - smoothstep(r, r * 1.7, d)) * 0.05;
+
+            // ~12% of L2 stars briefly blink. Period 6–15s per star,
+            // each blink is a narrow gaussian bump (~0.4s) over a steady
+            // base — sparse and asynchronous, never a constant pulse.
+            float ht     = hash21(i + 47.0);
+            float doBlink = step(0.88, ht);
+            float bSeed  = hash21(i + 91.0);
+            float period = 6.0 + 9.0 * bSeed;
+            float phase  = bSeed * 13.7;
+            float u      = mod(t + phase, period) / period;
+            float bump   = exp(-pow((u - 0.5) * 25.0, 2.0));
+            float bright = 1.0 + doBlink * bump * 0.6;
+
+            vec3 tint = mix(vec3(0.85, 0.92, 1.00),
+                            vec3(1.00, 0.92, 0.78),
+                            hash21(i + 9.0) * 0.7);
+            acc += tint * (disk + halo) * bright;
+        }
+    }
+
+    // L3 — rare hero stars; soft glow + slow pulse (~2–4 px).
+    {
+        const float DEN = 10.0;
+        vec2 g = p * DEN + vec2(91.3, 7.7);
+        vec2 i = floor(g);
+        vec2 f = fract(g) - 0.5;
+        float h = hash21(i);
+        if (h > 0.990) {
+            float t01 = (h - 0.990) / 0.010;
+            vec2 jit = (vec2(hash21(i + 21.0), hash21(i + 83.0)) - 0.5) * 0.35;
+            vec2 ff  = f - jit;
+            float d  = length(ff);
+            float r  = mix(0.020, 0.040, t01);
+            float aa = aaP * DEN;
+            float disk = 1.0 - smoothstep(max(0.0, r - aa), r + aa, d);
+            float glow = (1.0 - smoothstep(r, r * 2.2, d)) * 0.06;
+            vec3 tint = mix(vec3(0.92, 0.96, 1.00),
+                            vec3(1.00, 0.94, 0.82),
+                            hash21(i + 51.0));
+            acc += tint * (disk * 1.10 + glow);
+        }
+    }
+
+    return acc;
+}
 
 void main() {
     vec2 uv = (gl_FragCoord.xy * 2.0 - u_res.xy) / u_res.y;
     vec2 m  = u_mouse - 0.5;
-
-    // Slight diagonal flow.
-    float a = 0.18;
-    float ca = cos(a), sa = sin(a);
-    vec2 p = vec2(ca * uv.x - sa * uv.y, sa * uv.x + ca * uv.y);
-
     float t = u_time;
 
-    // Mouse rotates the entire light rig as a rigid sphere around the
-    // ribbon — relative positions of the three lights are preserved, the
-    // whole constellation just spins. Yaw from cursor x, pitch from
-    // cursor y (Rx * Ry, applied to the constant light positions).
-    float yaw   = m.x * 2.0;
-    float pitch = m.y * 1.5;
-    float cy = cos(yaw),   sy = sin(yaw);
-    float cp = cos(pitch), sp = sin(pitch);
-    mat3 lightRig = mat3(
-        vec3( cy,     sp * sy, -cp * sy),
-        vec3( 0.0,    cp,       sp     ),
-        vec3( sy,    -sp * cy,  cp * cy)
-    );
+    // Night sky: darker at top, a touch of brand violet near the horizon.
+    float topDarken = smoothstep(-0.9, 0.9, uv.y);
+    vec3 sky = mix(u_bg * 1.15, u_bg * 0.55, topDarken);
+    sky += vec3(0.10, 0.04, 0.16) * smoothstep(-1.0, 0.2, -uv.y) * 0.55;
 
-    // Ribbon orientation at this column.
-    // Approximation: tangent ~ +x (we ignore spine slope here for
-    // orthographic mapping in x). Width direction rotates around tangent
-    // by theta, so it goes from (0,1,0) at theta=0 to (0,0,1) at pi/2.
-    float ys = spine(p.x, t);
-    float th = twistAngle(p.x, t);
-    float sn = sin(th), cn = cos(th);
+    float skyMask = smoothstep(-0.2, 0.4, uv.y);
 
-    // Ribbon surface normal (T x W) — same for all stripes at this column.
-    vec3 N = vec3(0.0, -sn, cn);
+    vec3 col = sky;
 
-    // Three point lights mounted on a rigid rig that the mouse spins
-    // around the ribbon. Per-stripe inverse-square attenuation against
-    // three distinct tones produces the depth-banded coloured gradient.
-    //   key  (front-right, above): orange-red
-    //   fill (front-left, below):  azure
-    //   rim  (behind,      above): magenta — lights the back side
-    const vec3 KEY_COL  = vec3(1.00, 0.25, 0.05);
-    const vec3 FILL_COL = vec3(0.05, 0.45, 1.00);
-    const vec3 RIM_COL  = vec3(1.00, 0.05, 0.85);
-
-    vec3 KEY_POS  = lightRig * vec3( 0.95,  0.60,  1.30);
-    vec3 FILL_POS = lightRig * vec3(-1.20, -0.25,  1.00);
-    vec3 RIM_POS  = lightRig * vec3( 0.10,  0.55, -1.10);
-
-    // Perspective foreshortening — closer stripes bigger, farther smaller.
-    float focal   = 2.0;
-    float spacing = 0.045;
-    float aa      = fwidth(p.y);
-    float lwBase  = 1.4 * aa;
-
-    float along = smoothstep(-1.7, -0.6, p.x)
-                * (1.0 - smoothstep(0.7, 1.8, p.x));
-
-    vec3 col = u_bg;
-
-    // Iterate stripes back-to-front: march from negative z (behind) to
-    // positive z (in front), so closer stripes alpha-composite *over*
-    // farther ones — real occlusion in 3D.
-    for (int kk = 0; kk <= 2 * N_HALF; kk++) {
-        int k = (sn >= 0.0) ? (kk - N_HALF) : (N_HALF - kk);
-
-        float uk = float(k) * spacing;
-
-        // 3D position of this stripe at this column.
-        float yk = ys + uk * cn;
-        float zk = uk * sn;
-        vec3  P3 = vec3(p.x, yk, zk);
-
-        // Perspective projection.
-        float w    = max(1.0 - zk / focal, 0.05);
-        float scrY = yk / w;
-        float d    = abs(p.y - scrY);
-
-        float lwk  = lwBase / w;
-        float core = 1.0 - smoothstep(lwk - aa, lwk + aa, d);
-        float halo = (1.0 - smoothstep(lwk, lwk * 3.0, d)) * 0.18;
-        float l    = clamp(core + halo, 0.0, 1.0) * along;
-
-        float bandT = abs(float(k)) / float(N_HALF);
-        l *= pow(1.0 - bandT, 1.4);
-
-        // ---- Per-stripe 3D lighting from three positional lights -----
-        vec3 V = vec3(0.0, 0.0, 1.0);
-
-        // Key (warm, front-right-above): main diffuse + tight specular.
-        vec3  dK    = KEY_POS - P3;
-        float distK = length(dK);
-        vec3  Lk    = dK / distK;
-        float attK  = 1.0 / (1.0 + 0.10 * distK * distK);
-        float diffK = abs(dot(N, Lk));
-        float specK = pow(max(0.0, abs(dot(N, normalize(Lk + V)))), 28.0);
-
-        // Fill (cool, front-left-below): softer diffuse, mild specular.
-        vec3  dF    = FILL_POS - P3;
-        float distF = length(dF);
-        vec3  Lf    = dF / distF;
-        float attF  = 1.0 / (1.0 + 0.15 * distF * distF);
-        float diffF = abs(dot(N, Lf));
-        float specF = pow(max(0.0, abs(dot(N, normalize(Lf + V)))), 22.0);
-
-        // Rim (accent, behind): catches stripes whose back face is angled
-        // toward the rear — adds a coloured halo along silhouettes.
-        vec3  dR    = RIM_POS - P3;
-        float distR = length(dR);
-        vec3  Lr    = dR / distR;
-        float attR  = 1.0 / (1.0 + 0.20 * distR * distR);
-        float diffR = abs(dot(N, Lr));
-        float specR = pow(max(0.0, abs(dot(N, normalize(Lr + V)))), 18.0);
-
-        float ambient = 0.04;
-
-        // White material: lights' colours come through unchanged.
-        vec3 stripeCol =
-              vec3(ambient)
-            + KEY_COL  * diffK * attK * 1.05
-            + FILL_COL * diffF * attF * 0.55
-            + RIM_COL  * diffR * attR * 0.65
-            + KEY_COL  * specK * attK * 0.85
-            + FILL_COL * specF * attF * 0.30
-            + RIM_COL  * specR * attR * 0.45;
-
-        // Composite over what's behind.
-        col = mix(col, stripeCol, l * 0.88);
+    // Six layered curtains. Closer (higher depth) ones get more parallax
+    // and slightly stronger emission for an atmospheric effect.
+    const int N_CURTAINS = 6;
+    for (int i = 0; i < N_CURTAINS; i++) {
+        float depth = float(i) / float(N_CURTAINS - 1);   // 0 far .. 1 near
+        vec2 px = uv + vec2(-m.x * 0.40 * depth,
+                            -m.y * 0.12 * depth);
+        vec3 c = curtain(px, t, i);
+        // Far curtains slightly desaturated for atmospheric haze.
+        c = mix(vec3(dot(c, vec3(0.33))), c, mix(0.55, 1.0, depth));
+        col += c * mix(0.55, 1.05, depth);
     }
 
-    // Gentle vignette.
-    float v = smoothstep(1.35, 0.45, length(vec2(uv.x * 0.55, uv.y)));
-    col = mix(u_bg, col, 0.55 + 0.45 * v);
+    // Soft brand-violet glow on the lower band ("aurora-lit ground").
+    float groundGlow = smoothstep(-1.2, -0.35, -uv.y);
+    col += vec3(0.18, 0.06, 0.22) * groundGlow * 0.22;
 
-    // Subtle film grain.
-    float g = (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.025;
+    // Tonemap: emissive accumulation can blow out — compress it.
+    col = vec3(1.0) - exp(-col * 1.35);
+
+    // Vignette.
+    float v = smoothstep(1.45, 0.45, length(vec2(uv.x * 0.60, uv.y * 0.95)));
+    col = mix(u_bg * 0.6, col, 0.55 + 0.45 * v);
+
+    // Stars sit on top — they're point lights, not affected by vignette
+    // or aurora tonemapping.
+    col += stars(uv + vec2(0.21, -0.07), t) * skyMask;
+
+    // Film grain.
+    float g = (hash21(gl_FragCoord.xy + u_time) - 0.5) * 0.025;
     col += g;
 
     outColor = vec4(col, 1.0);
