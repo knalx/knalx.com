@@ -110,9 +110,6 @@
     gl.uniform3fv(uBg, readColor("--bg", [0.043, 0.051, 0.071]));
   }
   refreshColors();
-  window
-    .matchMedia("(prefers-color-scheme: dark)")
-    .addEventListener("change", refreshColors);
 
   let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let w = 0;
