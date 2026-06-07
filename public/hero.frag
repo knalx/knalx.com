@@ -158,6 +158,16 @@ vec3 curtain(vec2 p, float t, int idx) {
     float rays = vnoise1(p.x * 6.0 + drift * 0.6 - alt * 0.35);
     rays = mix(0.40, 1.30, rays);
 
+    // Vibration stripes are parallel, but tilted on a single axis to
+    // convey the "viewed from below and slightly to the side" angle.
+    // Projecting p onto (1, 0.35) gives stripes leaning ~19° from
+    // vertical — all parallel to each other, none converging.
+    float stripeAxis = p.x + p.y * 0.35;
+    float vibCarrier = vnoise1(stripeAxis * 32.0 + drift * 0.8);
+    float vibPatch   = smoothstep(0.55, 0.78,
+                                  vnoise1(stripeAxis * 1.5 + drift * 0.15 + 11.0));
+    rays *= mix(1.0, mix(0.55, 2.10, vibCarrier), vibPatch);
+
     float n1 = vnoise1(p.x * 0.35 + drift * 0.3);
     float n2 = vnoise1(p.x * 0.85 - drift * 0.5 + alt * 1.8);
     float patches = mix(0.65, 1.30, n1 * n2 * 1.6 + 0.10);
@@ -313,7 +323,7 @@ vec3 stars(vec2 p, float t) {
             float t01 = (h - 0.981) / 0.019;
             vec2 jit = (vec2(hash21(i + 13.0), hash21(i + 71.0)) - 0.5) * 0.55;
             float d  = length(f - jit);
-            float r  = mix(0.020, 0.040, t01);
+            float r  = mix(0.020, 0.028, t01);
             float aa = aaP * DEN;
             float disk = 1.0 - smoothstep(max(0.0, r - aa), r + aa, d);
             vec3 tint = mix(vec3(0.80, 0.88, 1.00),
@@ -335,7 +345,7 @@ vec3 stars(vec2 p, float t) {
             vec2 jit = (vec2(hash21(i + 5.0), hash21(i + 19.0)) - 0.5) * 0.45;
             vec2 ff  = f - jit;
             float d  = length(ff);
-            float r  = mix(0.025, 0.050, t01);
+            float r  = mix(0.025, 0.035, t01);
             float aa = aaP * DEN;
             float disk = 1.0 - smoothstep(max(0.0, r - aa), r + aa, d);
             float halo = (1.0 - smoothstep(r, r * 1.7, d)) * 0.05;
@@ -368,7 +378,7 @@ vec3 stars(vec2 p, float t) {
             vec2 jit = (vec2(hash21(i + 21.0), hash21(i + 83.0)) - 0.5) * 0.35;
             vec2 ff  = f - jit;
             float d  = length(ff);
-            float r  = mix(0.020, 0.040, t01);
+            float r  = mix(0.020, 0.028, t01);
             float aa = aaP * DEN;
             float disk = 1.0 - smoothstep(max(0.0, r - aa), r + aa, d);
             float glow = (1.0 - smoothstep(r, r * 2.2, d)) * 0.06;
