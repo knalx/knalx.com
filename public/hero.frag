@@ -7,6 +7,7 @@ uniform vec2  u_res;
 uniform float u_time;
 uniform vec2  u_mouse;   // 0..1 in viewport space
 uniform vec3  u_bg;
+uniform float u_seed;    // per-session random offset for hash streams
 
 // -------- hashing & noise --------
 
@@ -76,25 +77,29 @@ vec3 curtain(vec2 p, float t, int idx) {
     // brightMult finish the look.
     float depthBias, brightMult, driftSpeed, phase;
     vec3  tint;
-    if (idx == 0) {           // BACK
+    if (idx == 0) {           // BACK — cool teal-cyan
         depthBias  = 0.55;
         brightMult = 1.6;
         driftSpeed = 0.045;
         phase      = 7.3;
-        tint       = vec3(0.70, 1.10, 1.30);
-    } else if (idx == 2) {    // FRONT
+        tint       = vec3(0.55, 1.25, 1.10);
+    } else if (idx == 2) {    // FRONT — warm pink-magenta
         depthBias  = -0.40;
         brightMult = 3.2;
         driftSpeed = 0.075;
         phase      = 3.1;
-        tint       = vec3(1.25, 0.85, 1.10);
-    } else {                  // MIDDLE
+        tint       = vec3(1.35, 0.70, 1.15);
+    } else {                  // MIDDLE — violet
         depthBias  = 0.0;
         brightMult = 2.5;
         driftSpeed = 0.06;
         phase      = 0.0;
-        tint       = vec3(1.0);
+        tint       = vec3(1.10, 0.85, 1.30);
     }
+    // Per-session random offset folded into phase, so every page load
+    // pulls a different stretch of the hash stream and the animation
+    // starts in a fresh state.
+    phase += u_seed;
     float drift = t * driftSpeed + phase;
 
     // 3D depth wave. Three harmonics of (p.x, t) give organic,
@@ -116,6 +121,17 @@ vec3 curtain(vec2 p, float t, int idx) {
     float ampZ    = mix(0.60, 1.40, near01);
     float heightZ = mix(0.70, 1.45, near01);
 
+    // Per-ribbon size: hard-coded scale factor by depth slot so back
+    // reads as visibly smaller than front. Combined with the local
+    // zWave-driven ampZ/heightZ, the depth ordering by SIZE becomes
+    // immediately legible.
+    float ribbonScale;
+    if (idx == 0)      ribbonScale = 0.55;   // back, small + far
+    else if (idx == 2) ribbonScale = 1.40;   // front, large + close
+    else               ribbonScale = 0.90;   // middle
+    ampZ    *= ribbonScale;
+    heightZ *= ribbonScale;
+
     // Bottom curve. Three harmonics, the middle phase-modulated by a
     // slower sine for uneven fold spacing, plus a small noise term.
     // Amplitudes scale with local depth so close folds swing larger.
@@ -130,15 +146,28 @@ vec3 curtain(vec2 p, float t, int idx) {
     float nArg   = p.x * 1.75 + drift * 0.4;
     float nDetail = vnoise1(nArg) - 0.5;
 
-    // Baseline shifts with local depth: close sections hang lower
-    // toward the foreground, far sections lift toward the horizon.
-    float yBase = 0.05 - 0.20 * near01;
+    // Baseline: viewing the aurora from below — the curtain right
+    // overhead is closest (highest on screen because we're looking up),
+    // and the one toward the horizon is the farthest (lowest on screen).
+    // So FRONT rides high, BACK rides low.
+    float yBaseOffset;
+    if (idx == 0)      yBaseOffset = -0.12;   // back, far away → low on screen
+    else if (idx == 2) yBaseOffset =  0.14;   // front, closest → high on screen
+    else               yBaseOffset =  0.0;    // middle
+    float yBase = yBaseOffset + 0.05 - 0.20 * near01;
 
     float yBot = yBase
                + a1 * sin(p.x * f1 + ph1)
                + a2 * sin(p.x * f2 + ph2 + pm)
                + a3 * sin(p.x * f3 + ph3)
                + 0.06 * nDetail;
+
+    // Soft-clamp the bottom edge so it never reaches the top or bottom
+    // of the frame. tanh() compresses extreme excursions toward the
+    // bound smoothly instead of flatlining at a hard limit, leaving
+    // ~15% padding above and below the line at peak swings.
+    const float yBound = 0.85;
+    yBot = yBound * tanh(yBot / yBound);
 
     float alt = p.y - yBot;
 
@@ -147,7 +176,7 @@ vec3 curtain(vec2 p, float t, int idx) {
     float hN1 = vnoise1(p.x * 0.4 + drift * 0.08);
     float hN2 = vnoise1(p.x * 1.375 - drift * 0.12 + 7.0);
     float heightVar = 0.65 + 0.85 * (hN1 * 0.65 + hN2 * 0.35);
-    float height = 0.55 * heightVar * heightZ;
+    float height = 0.95 * heightVar * heightZ;
     float bottomFade = smoothstep(-0.04, 0.02, alt);
     float tail       = exp(-max(alt, 0.0) * 2.0 / max(0.001, height));
     float topCap     = 1.0 - smoothstep(height * 0.6, height * 1.4, alt);
@@ -155,21 +184,93 @@ vec3 curtain(vec2 p, float t, int idx) {
 
     float hot = exp(-alt * alt * 1100.0) * 0.45 * bottomFade;
 
-    float rays = vnoise1(p.x * 6.0 + drift * 0.6 - alt * 0.35);
+    // Tilted screen coord — used everywhere a spatial pattern should
+    // follow the "viewed from below and to the side" perspective.
+    float stripeAxis = p.x + p.y * 0.35;
+
+    // Base rays measured along stripeAxis so the soft stripe texture
+    // leans at the same ~19° as the discrete ray/shadow systems.
+    float rays = vnoise1(stripeAxis * 6.0 + drift * 0.6 - alt * 0.35);
     rays = mix(0.40, 1.30, rays);
 
-    // Vibration stripes are parallel, but tilted on a single axis to
-    // convey the "viewed from below and slightly to the side" angle.
-    // Projecting p onto (1, 0.35) gives stripes leaning ~19° from
-    // vertical — all parallel to each other, none converging.
-    float stripeAxis = p.x + p.y * 0.35;
-    float vibCarrier = vnoise1(stripeAxis * 32.0 + drift * 0.8);
-    float vibPatch   = smoothstep(0.55, 0.78,
-                                  vnoise1(stripeAxis * 1.5 + drift * 0.15 + 11.0));
-    rays *= mix(1.0, mix(0.55, 2.10, vibCarrier), vibPatch);
+    // Discrete-ray "switching" — the physical spine of aurora
+    // vibration. In nature, only some magnetic field lines receive
+    // precipitating electrons at any instant; as the magnetospheric
+    // source moves, different field lines briefly light up. We model
+    // this with 6 staggered slots, each running a lifecycle:
+    //   fade in → live (slow pulsation × fast flicker) → fade out →
+    //   rehash random position/width for the next cycle.
+    //
+    // Per ray:
+    //   • slow pulsation  — chorus-wave-modulated, ~0.6-2 rad/s
+    //   • fast flicker    — ion-cyclotron-modulated, 5-11 Hz
+    //
+    // Position is along `stripeAxis` (declared above) so rays read as
+    // columns leaning ~19° from vertical, matching the shadow/patches
+    // tilt.
+    float vibAccum   = 0.0;
+    vec3  vibColored = vec3(0.0);
+    for (int k = 0; k < 6; k++) {
+        float fk       = float(k);
+        float period   = 2.5 + 1.2 * fk;
+        float phaseOff = fk * 0.137 + phase * 0.13;
+        float cyc      = mod(t / period + phaseOff, 1.0);
+        float iter     = floor(t / period + phaseOff);
 
-    float n1 = vnoise1(p.x * 0.35 + drift * 0.3);
-    float n2 = vnoise1(p.x * 0.85 - drift * 0.5 + alt * 1.8);
+        float pres     = smoothstep(0.0, 0.10, cyc)
+                       * (1.0 - smoothstep(0.85, 1.00, cyc));
+
+        float xBase    = -1.8 + 3.6 * hash11(iter * 7.3 + fk * 13.1);
+        float xDir     = (hash11(iter * 7.3 + fk * 17.7) - 0.5) * 0.30;
+        float x        = xBase + xDir * cyc;
+
+        float w        = 0.10 + 0.14 * hash11(iter * 11.3 + fk * 23.7);
+        float spatial  = exp(-pow((stripeAxis - x) / w, 2.0));
+
+        float pulseW   = 0.6 + 0.28 * fk;
+        float pulse    = 0.70 + 0.30 * sin(t * pulseW + iter * 1.7);
+
+        // Flicker as gentle noise modulation rather than a hard sine
+        // strobe — at 1-2.5 Hz it reads as natural shimmer instead of
+        // a dropped frame. Amplitude kept small so it never cuts the
+        // ray's brightness in half.
+        float flickHz  = 1.0 + 1.5 * hash11(iter * 31.7 + fk * 41.3);
+        float flicker  = 0.85 + 0.15 * vnoise1(t * flickHz + iter * 5.3);
+
+        // Widened amplitude range for stronger contrast between rays —
+        // some rays are subtle, others punch through dramatically.
+        float amp      = 0.40 + 1.40 * hash11(iter * 19.3 + fk * 29.1);
+
+        // Per-ray colour tint from an aurora-emission palette. The hash
+        // picks one of five aurora hues — green (557.7 nm OI), red
+        // (630 nm OI), blue (N₂⁺), magenta (combined), cyan — so each
+        // ray adds its own colour to the curtain.
+        float hHash = hash11(iter * 5.7 + fk * 17.3 + 2.3);
+        vec3  rayHue;
+        if      (hHash < 0.20) rayHue = vec3(0.55, 1.25, 0.70);   // emerald green
+        else if (hHash < 0.40) rayHue = vec3(1.25, 0.60, 0.70);   // red
+        else if (hHash < 0.60) rayHue = vec3(0.60, 0.65, 1.30);   // deep blue
+        else if (hHash < 0.80) rayHue = vec3(1.20, 0.65, 1.20);   // magenta
+        else                   rayHue = vec3(0.60, 1.15, 1.25);   // cyan
+
+        float intensity = amp * spatial * pres * pulse * flicker;
+        vibAccum   += intensity;
+        vibColored += rayHue * intensity;
+    }
+
+    // Vertical anisotropy — emission peaks at the ~110 km O₂ layer
+    // (bottom of the curtain) and decays exponentially upward.
+    float vibVertical = exp(-max(alt, 0.0) * 5.0 / max(0.001, height));
+
+    // Purely additive: vibration only brightens; never dims. The
+    // multiplier ≥ 1.0 floor preserves the line baseline everywhere.
+    rays *= 1.0 + vibAccum * vibVertical * 0.6;
+
+    // Patches use stripeAxis so the bright/dim banding tilts with the
+    // rest of the spatial structure — otherwise you see horizontal
+    // dim bands while the actual shadow wells lean diagonally.
+    float n1 = vnoise1(stripeAxis * 0.35 + drift * 0.3);
+    float n2 = vnoise1(stripeAxis * 0.85 - drift * 0.5 + alt * 1.8);
     float patches = mix(0.65, 1.30, n1 * n2 * 1.6 + 0.10);
 
     // Up to 3 shadow wells per ribbon, each with its own fade-in /
@@ -200,23 +301,31 @@ vec3 curtain(vec2 p, float t, int idx) {
 
     // Each shadow drifts across its lifetime: random start position
     // plus a random drift direction/distance scaled by cycle progress.
-    // The shadow appears, slides across the ribbon, then fades out at
-    // its end position before the slot rehashes for the next cycle.
-    float c0_base = -1.7 + 3.4 * hash11(iter0 * 7.3 +  1.1);
-    float c1_base = -1.7 + 3.4 * hash11(iter1 * 7.3 +  5.7);
-    float c2_base = -1.7 + 3.4 * hash11(iter2 * 7.3 + 11.3);
-    float c0_dir  = (hash11(iter0 * 7.3 + 31.7) - 0.5) * 4.8;
-    float c1_dir  = (hash11(iter1 * 7.3 + 47.3) - 0.5) * 4.8;
-    float c2_dir  = (hash11(iter2 * 7.3 + 61.9) - 0.5) * 4.8;
+    // Phase folded into the hash seed so different ribbons get truly
+    // independent positions/widths even when their iter values align.
+    float c0_base = -1.7 + 3.4 * hash11(iter0 * 7.3 +  1.1 + phase * 3.7);
+    float c1_base = -1.7 + 3.4 * hash11(iter1 * 7.3 +  5.7 + phase * 4.1);
+    float c2_base = -1.7 + 3.4 * hash11(iter2 * 7.3 + 11.3 + phase * 5.3);
+    float c0_dir  = (hash11(iter0 * 7.3 + 31.7 + phase * 2.9) - 0.5) * 4.8;
+    float c1_dir  = (hash11(iter1 * 7.3 + 47.3 + phase * 3.3) - 0.5) * 4.8;
+    float c2_dir  = (hash11(iter2 * 7.3 + 61.9 + phase * 6.7) - 0.5) * 4.8;
     float c0 = c0_base + c0_dir * cyc0;
     float c1 = c1_base + c1_dir * cyc1;
     float c2 = c2_base + c2_dir * cyc2;
 
-    // Width hashed in [0.80, 1.20] — pulled back to a more compact
-    // footprint after the previous min was too dominant.
-    float w0 = 0.80 + 0.40 * hash11(iter0 * 11.7 +  2.1);
-    float w1 = 0.80 + 0.40 * hash11(iter1 * 11.7 +  7.7);
-    float w2 = 0.80 + 0.40 * hash11(iter2 * 11.7 + 13.3);
+    // Width heavily biased toward wide diffuse shadows: most cycles
+    // produce a broad [1.5, 2.4] blur. Only ~10% of cycles roll the
+    // "narrow stripe" mode (width [0.30, 0.50]) so the thin dark line
+    // is a rare visual event rather than the default look.
+    float wHash0 = hash11(iter0 * 11.7 +  2.1 + phase * 2.3);
+    float wHash1 = hash11(iter1 * 11.7 +  7.7 + phase * 3.1);
+    float wHash2 = hash11(iter2 * 11.7 + 13.3 + phase * 4.7);
+    float nrm0   = step(0.90, hash11(iter0 * 13.3 +  3.1 + phase * 5.7));
+    float nrm1   = step(0.90, hash11(iter1 * 13.3 +  9.7 + phase * 7.1));
+    float nrm2   = step(0.90, hash11(iter2 * 13.3 + 17.3 + phase * 8.3));
+    float w0 = mix(1.5 + 0.9 * wHash0, 0.30 + 0.20 * wHash0, nrm0);
+    float w1 = mix(1.5 + 0.9 * wHash1, 0.30 + 0.20 * wHash1, nrm1);
+    float w2 = mix(1.5 + 0.9 * wHash2, 0.30 + 0.20 * wHash2, nrm2);
 
     // Appear animation: width snaps open from ~0 to its target over
     // the first 10% of the cycle, so each shadow "pops" into existence
@@ -229,9 +338,12 @@ vec3 curtain(vec2 p, float t, int idx) {
     float effW2 = mix(0.001, w2, wScale2);
 
     // Shadow depth scales with presence so it fades in / fades out.
-    float s0 = 1.0 - pres0 * exp(-pow((p.x - c0) / effW0, 2.0));
-    float s1 = 1.0 - pres1 * exp(-pow((p.x - c1) / effW1, 2.0));
-    float s2 = 1.0 - pres2 * exp(-pow((p.x - c2) / effW2, 2.0));
+    // Measured along `stripeAxis` (same tilted coord as the vibration
+    // rays) so shadows lean at the same angle instead of reading as
+    // vertical bands while the rays are diagonal.
+    float s0 = 1.0 - pres0 * exp(-pow((stripeAxis - c0) / effW0, 2.0));
+    float s1 = 1.0 - pres1 * exp(-pow((stripeAxis - c1) / effW1, 2.0));
+    float s2 = 1.0 - pres2 * exp(-pow((stripeAxis - c2) / effW2, 2.0));
     float dropout = s0 * s1 * s2;
 
     // Fold-like brightening at steep parts of the bottom curve.
@@ -260,6 +372,14 @@ vec3 curtain(vec2 p, float t, int idx) {
     col = mix(vec3(dot(col, vec3(0.33))) * 0.75, col,
               mix(0.70, 1.00, near01));
     col *= mix(0.85, 1.35, near01);
+
+    // Per-ray colour tint: where discrete vibration rays are active,
+    // pull `col` toward the average hue weighted by their intensities.
+    // The vertical falloff also scales the tint so colour-shifts are
+    // strongest near the curtain's bottom edge.
+    vec3  avgRayHue = vibColored / max(0.001, vibAccum);
+    float tintAmt   = clamp(vibAccum * vibVertical * 0.50, 0.0, 0.65);
+    col = mix(col, col * avgRayHue, tintAmt);
 
     // Independent green-tint wells — parallel to the shadow system
     // (random fade-in / drift / fade-out lifecycle) but layered on
@@ -291,9 +411,9 @@ vec3 curtain(vec2 p, float t, int idx) {
     float gw2 = mix(0.001, 0.80 + 0.40 * hash11(gi2 * 9.1 + 17.7),
                     smoothstep(0.0, 0.10, gcyc2));
 
-    float gAmt = max(max(gp0 * exp(-pow((p.x - gc0) / gw0, 2.0)),
-                         gp1 * exp(-pow((p.x - gc1) / gw1, 2.0))),
-                         gp2 * exp(-pow((p.x - gc2) / gw2, 2.0)));
+    float gAmt = max(max(gp0 * exp(-pow((stripeAxis - gc0) / gw0, 2.0)),
+                         gp1 * exp(-pow((stripeAxis - gc1) / gw1, 2.0))),
+                         gp2 * exp(-pow((stripeAxis - gc2) / gw2, 2.0)));
     col = mix(col, col * vec3(0.50, 1.65, 0.70), gAmt);
 
     // Apply per-ribbon hue tint and brightness.
@@ -407,12 +527,12 @@ void main() {
     vec3 col = sky;
 
     // Three 3D-dynamic ribbons. Each has its own perspective baseline,
-    // hue tint and drift phase; parallax shift scales with depth so the
-    // back ribbon barely moves with the mouse and the front one shifts
-    // significantly. Order: back → middle → front for natural overlap.
-    col += curtain(uv + vec2(-m.x * 0.16, -m.y * 0.05), t, 0);
-    col += curtain(uv + vec2(-m.x * 0.32, -m.y * 0.10), t, 1);
-    col += curtain(uv + vec2(-m.x * 0.52, -m.y * 0.16), t, 2);
+    // hue tint and drift phase. Parallax coefficients are deliberately
+    // small — at this scale a tiny shift reads as a great distance,
+    // selling the depth illusion more than aggressive motion does.
+    col += curtain(uv + vec2(-m.x * 0.05, -m.y * 0.015), t, 0);
+    col += curtain(uv + vec2(-m.x * 0.13, -m.y * 0.04),  t, 1);
+    col += curtain(uv + vec2(-m.x * 0.26, -m.y * 0.07),  t, 2);
 
     // Soft brand-violet glow on the lower band ("aurora-lit ground").
     float groundGlow = smoothstep(-1.2, -0.35, -uv.y);

@@ -72,6 +72,16 @@
   const uTime = gl.getUniformLocation(prog, "u_time");
   const uMouse = gl.getUniformLocation(prog, "u_mouse");
   const uBg = gl.getUniformLocation(prog, "u_bg");
+  const uSeed = gl.getUniformLocation(prog, "u_seed");
+
+  // Per-session random seed — shifts the shader's hash stream so the
+  // animation starts in a different state on every page load. Combines
+  // Math.random() with the current wall-clock time so the seed is
+  // guaranteed to vary even if Math.random() repeats.
+  gl.uniform1f(
+    uSeed,
+    Math.random() * 1000.0 + ((Date.now() / 1000.0) % 100000.0),
+  );
 
   // Pull background color from the CSS custom property so the shader
   // follows the theme.
