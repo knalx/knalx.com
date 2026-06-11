@@ -256,7 +256,7 @@ a:hover {
     font-weight: 500;
     font-size: clamp(2.4rem, 7vw, 5.5rem);
     line-height: 1.05;
-    letter-spacing: -0.02em;
+    letter-spacing: 0;
     margin: 0 0 1.5rem;
     max-width: 18ch;
     text-shadow:
@@ -313,8 +313,49 @@ a:hover {
 
 /* ---------- Sections ---------- */
 .section {
+    position: relative;
     padding: clamp(4rem, 10vw, 8rem) 0;
-    border-top: 1px solid var(--line);
+}
+
+.section::before,
+.site-footer::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        color-mix(in oklab, var(--accent-a) 30%, transparent) 25%,
+        var(--accent-a) 50%,
+        color-mix(in oklab, var(--accent-a) 30%, transparent) 75%,
+        transparent
+    );
+    pointer-events: none;
+}
+
+.section::after,
+.site-footer::after {
+    content: "";
+    position: absolute;
+    top: -12px;
+    left: 50%;
+    width: min(420px, 60%);
+    height: 24px;
+    transform: translateX(-50%);
+    background: radial-gradient(
+        ellipse at center,
+        var(--accent-glow),
+        transparent 65%
+    );
+    pointer-events: none;
+}
+
+.section--legal::before,
+.section--legal::after {
+    display: none;
 }
 
 .container {
@@ -537,7 +578,7 @@ a:hover {
 
 /* ---------- Footer ---------- */
 .site-footer {
-    border-top: 1px solid var(--line);
+    position: relative;
     padding: clamp(3rem, 8vw, 6rem) 0 3rem;
 }
 
@@ -561,6 +602,59 @@ a:hover {
 .links a {
     border-bottom: 1px solid var(--line);
     padding-bottom: 2px;
+}
+
+.footer__bottom {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.legal-links {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    font-size: 0.85rem;
+    color: var(--fg-mute);
+}
+
+.legal-links a {
+    border-bottom: 1px solid transparent;
+    padding-bottom: 1px;
+    transition: border-color 0.2s ease;
+}
+
+.legal-links a:hover {
+    border-bottom-color: var(--accent-a);
+}
+
+/* ---------- Legal pages (Impressum / Datenschutz) ---------- */
+.prose.legal h2 {
+    font-family: var(--font-display);
+    font-weight: 500;
+    font-size: clamp(1.05rem, 1.6vw, 1.25rem);
+    letter-spacing: -0.01em;
+    color: var(--fg);
+    margin: 2rem 0 0.5rem;
+}
+
+.prose.legal h2:first-child {
+    margin-top: 0;
+}
+
+.prose.legal ul {
+    color: var(--fg-soft);
+    margin: 0 0 1.1rem;
+    padding-left: 1.25rem;
+}
+
+.prose.legal ul li {
+    margin: 0 0 0.35rem;
 }
 
 .footer__fine {
