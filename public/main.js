@@ -3,6 +3,17 @@
   const yr = document.getElementById("year");
   if (yr) yr.textContent = String(new Date().getFullYear());
 
+  // Brand link: scroll to absolute top. Native anchor scroll fails because
+  // #top is on the sticky header, which is already pinned at y=0.
+  const brand = document.querySelector(".brand");
+  if (brand) {
+    brand.addEventListener("click", (e) => {
+      e.preventDefault();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      history.replaceState(null, "", location.pathname);
+    });
+  }
+
   // Header shadow on scroll
   const header = document.querySelector(".site-header");
   if (header) {
