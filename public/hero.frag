@@ -8,6 +8,7 @@ uniform float u_time;
 uniform vec2  u_orbit;   // accumulated surface rotation (drag + orbital drift)
 uniform float u_detail;  // 0.6..1.0 — step budget, lowered during fast motion
 uniform float u_motion;  // 1 = animate, 0 = reduced motion
+uniform float u_view;    // 0 = normal palette, 1 = view-mode hue spread + drift
 
 /* ---------- noise ---------- */
 float hash21(vec2 p) {
@@ -140,6 +141,24 @@ vec3 starLayer(vec2 g, float thresh, float t) {
   return (mix(vec3(1.0), tint, 0.35) * core + tint * (halo + sp)) * tw;
 }
 
+/* ---------- HSV helpers (Iñigo Quílez) ----------
+   Used by view mode to rotate the hue of the aurora palette per-region
+   and over time, so the curtains drift through a wider spectrum than
+   the green/teal/magenta default. */
+vec3 rgb2hsv(vec3 c) {
+  vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y);
+  float e = 1.0e-10;
+  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+vec3 hsv2rgb(vec3 c) {
+  vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
 void main() {
   vec2 uv = gl_FragCoord.xy / u_res;
   vec2 p  = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
@@ -215,6 +234,27 @@ void main() {
         // ...deep crimson-magenta at the tops
         ac = mix(ac, vec3(0.62, 0.04, 0.28), smoothstep(0.55, 0.95, a));
         vec3 fc = mix(vec3(0.03, 0.55, 0.22), vec3(0.04, 0.45, 0.42), cf.z);
+        // view mode: rotate the hue of each curtain by a region-varying,
+        // slowly-cycling angle. cf.z gives each region a different base
+        // offset so neighbouring curtains take different colours, and a
+        // few sin terms at distinct frequencies keep the palette
+        // drifting through the whole wheel without ever looping
+        // visibly. Saturation gets a small bump so the new hues read.
+        if (u_view > 0.001) {
+          // toned-down spread: keeps a teal-green base but lets
+          // neighbouring curtains drift a small amount and the whole
+          // palette slide slowly over time. Never sweeps the full wheel.
+          float hueOff = cf.z * 0.22
+                      + 0.12 * sin(t * 0.13 + cf.z * 6.28)
+                      + 0.08 * sin(t * 0.07);
+          vec3 hsv = rgb2hsv(ac);
+          hsv.x = fract(hsv.x + u_view * hueOff);
+          hsv.y = clamp(hsv.y * (1.0 + 0.08 * u_view), 0.0, 1.0);
+          ac = hsv2rgb(hsv);
+          vec3 fhsv = rgb2hsv(fc);
+          fhsv.x = fract(fhsv.x + u_view * hueOff);
+          fc = hsv2rgb(fhsv);
+        }
         acc += (ac * densL + fc * densF) * fade;
       }
       tc += stepLen;

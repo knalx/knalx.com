@@ -71,6 +71,7 @@
   const uOrbit = gl.getUniformLocation(prog, "u_orbit");
   const uDetail = gl.getUniformLocation(prog, "u_detail");
   const uMotion = gl.getUniformLocation(prog, "u_motion");
+  const uView = gl.getUniformLocation(prog, "u_view");
 
   // 256x256 white-noise lattice texture — feeds the shader's vnoise()
   // with one hardware-filtered fetch instead of 4 arithmetic hashes
@@ -139,12 +140,21 @@
   let curX = 0;
   let curY = 0;
   let curT = 0;
+  // Once a drag moves past this distance from the press point, we
+  // consider the user to be "rotating" the globe — tagged on <body> so
+  // CSS can fade the hero copy + header out of the way. The class
+  // sticks until the About section scrolls into view (handled below),
+  // at which point we clear it so the chrome reappears. A pure click
+  // (no movement) stays below the threshold and leaves the chrome alone.
+  let dragStartX = 0;
+  let dragStartY = 0;
+  const ROTATE_THRESHOLD = 8;
   const VMAX = 6.0;
 
   heroEl.addEventListener("pointerdown", (e) => {
     dragging = true;
-    lastX = curX = e.clientX;
-    lastY = curY = e.clientY;
+    lastX = curX = dragStartX = e.clientX;
+    lastY = curY = dragStartY = e.clientY;
     lastT = curT = e.timeStamp;
     velX = velY = 0;
     document.documentElement.style.cursor = "grabbing";
@@ -156,12 +166,23 @@
       curX = e.clientX;
       curY = e.clientY;
       curT = e.timeStamp;
+      if (
+        !document.body.classList.contains("is-rotating") &&
+        Math.hypot(curX - dragStartX, curY - dragStartY) > ROTATE_THRESHOLD
+      ) {
+        document.body.classList.add("is-rotating");
+      }
     },
     { passive: true },
   );
   function endDrag(e) {
     if (!dragging) return;
     dragging = false;
+    // NOTE: we intentionally do NOT clear `body.is-rotating` here.
+    // Once the user starts exploring the sphere the chrome stays out
+    // of the way. The IntersectionObserver on #about (below) clears
+    // the class when they scroll down to the About section, bringing
+    // the chrome back.
     document.documentElement.style.cursor = "";
     if (e.timeStamp - curT > 120) {
       velX = velY = 0;
@@ -217,6 +238,17 @@
     new IntersectionObserver((es) => {
       onScreen = es[0].isIntersecting;
     }).observe(heroEl);
+
+    // exit "view mode" when the About section comes into view: the
+    // user has clearly moved past the hero, so bring chrome back
+    const aboutEl = document.getElementById("about");
+    if (aboutEl) {
+      new IntersectionObserver((es) => {
+        if (es[0].isIntersecting) {
+          document.body.classList.remove("is-rotating");
+        }
+      }).observe(aboutEl);
+    }
   }
 
   const t0 = performance.now();
@@ -233,6 +265,7 @@
 
   let lastRox = 1e9;
   let lastRoy = 1e9;
+  let viewLevel = 0; // 0..1, eased toward 1 in view mode for palette shift
   let detail = 1.0;
   function frame(now) {
     if (!running) return;
@@ -335,9 +368,17 @@
       lastRox = rox;
       lastRoy = roy;
       forceDraw = false;
+      // ease view-mode level toward 1 when the user is exploring the
+      // sphere (body.is-rotating) and back toward 0 otherwise
+      const viewTarget = document.body.classList.contains("is-rotating")
+        ? 1
+        : 0;
+      const viewK = 1 - Math.exp(-dt * 2.5);
+      viewLevel += (viewTarget - viewLevel) * viewK;
       gl.uniform1f(uTime, reduced ? 40.0 : ((now - t0) / 1000) % 5120);
       gl.uniform2f(uOrbit, rox, roy);
       gl.uniform1f(uDetail, detail);
+      gl.uniform1f(uView, viewLevel);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
     requestAnimationFrame(frame);
