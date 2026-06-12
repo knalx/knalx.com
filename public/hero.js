@@ -305,17 +305,17 @@
 
   async function loadStarCatalog() {
     if (!starProg) return;
-    let buf;
+    let ab;
     try {
       const res = await fetch("/stars.bin", { cache: "force-cache" });
       if (!res.ok) throw new Error(`stars.bin: ${res.status}`);
-      buf = await res.arrayBuffer();
+      ab = await res.arrayBuffer();
     } catch (e) {
       console.warn("star catalog unavailable, using procedural fallback", e);
       return;
     }
-    const view = new DataView(buf);
-    const n = (buf.byteLength / 8) | 0;
+    const view = new DataView(ab);
+    const n = (ab.byteLength / 8) | 0;
     const data = new Float32Array(n * 4);
     function unq(raw, lo, hi) {
       return lo + (raw / 65535) * (hi - lo);
