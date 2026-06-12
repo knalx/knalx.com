@@ -3,3 +3,4 @@
 # via scripts/build-star-catalog.py after downloading. URL is in the
 # script's docstring.
 scripts/hyg.csv
+.wrangler/
