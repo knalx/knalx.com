@@ -102,45 +102,6 @@ vec3 curtain(vec2 g, float t) {
   return vec3(line, fog, act);   // act doubles as a slow hue drift per region
 }
 
-/* one layer of stars on the sky direction grid.
-   A photographic star is not a disc: it is a tiny white-hot core (pushed
-   over 1.0 so the tone map saturates it), a wider gaussian halo that
-   carries the color tint, and — on the brightest few — a faint
-   diffraction cross. Brightness follows a power law: many dim, few
-   brilliant. Dim stars twinkle more than bright ones. */
-vec3 starLayer(vec2 g, float thresh, float t) {
-  vec2 id = floor(g);
-  vec2 f  = fract(g) - 0.5;
-  float h = hash21(id);
-  if (h < thresh) return vec3(0.0);
-  float h2 = hash21(id + 17.13);
-  float h3 = hash21(id + 41.71);
-  // random position inside the cell (margin keeps it from clipping)
-  vec2 pos = (vec2(h2, fract(h2 * 57.31)) - 0.5) * 0.6;
-  vec2 d  = f - pos;
-  float r2 = dot(d, d);
-  // power-law brightness: mostly faint, occasionally brilliant
-  float br = pow((h - thresh) / (1.0 - thresh), 5.0) * 0.95 + 0.05;
-  // white-hot point core, intensity well above 1 -> tone map clips it white
-  float core = exp(-r2 * (900.0 - 500.0 * br)) * (1.5 + 6.0 * br);
-  // gaussian halo carrying the color, grows with brightness
-  float halo = exp(-r2 * (90.0 - 40.0 * br)) * br * br * 0.55;
-  // faint diffraction cross, brightest stars only
-  float sp = 0.0;
-  if (br > 0.5) {
-    sp = (exp(-abs(d.x) * 12.0) * exp(-abs(d.y) * 80.0)
-        + exp(-abs(d.y) * 12.0) * exp(-abs(d.x) * 80.0))
-       * (br - 0.5) * 0.55 * exp(-r2 * 14.0);
-  }
-  // twinkle: each star has its own rate/phase; dim ones flicker more
-  float tw = 1.0 - (0.45 - 0.33 * br)
-           * (0.5 + 0.5 * sin(t * (1.5 + h3 * 3.5) + h3 * 80.0));
-  // color temperature: icy blue-white .. warm yellow-white
-  vec3 tint = mix(vec3(0.62, 0.74, 1.00), vec3(1.00, 0.86, 0.70), h3);
-  // core is near-white (stays only slightly tinted); halo + cross carry color
-  return (mix(vec3(1.0), tint, 0.35) * core + tint * (halo + sp)) * tw;
-}
-
 /* ---------- HSV helpers (Iñigo Quílez) ----------
    Used by view mode to rotate the hue of the aurora palette per-region
    and over time, so the curtains drift through a wider spectrum than
@@ -241,12 +202,13 @@ void main() {
         // drifting through the whole wheel without ever looping
         // visibly. Saturation gets a small bump so the new hues read.
         if (u_view > 0.001) {
-          // toned-down spread: keeps a teal-green base but lets
-          // neighbouring curtains drift a small amount and the whole
-          // palette slide slowly over time. Never sweeps the full wheel.
+          // toned-down spread: per-region offset (cf.z) gives
+          // neighbouring curtains different hues, with only a small
+          // time-cycling term so colors don't sweep the whole sky and
+          // mask different star groups as they slide.
           float hueOff = cf.z * 0.22
-                      + 0.12 * sin(t * 0.13 + cf.z * 6.28)
-                      + 0.08 * sin(t * 0.07);
+                      + 0.05 * sin(t * 0.13 + cf.z * 6.28)
+                      + 0.03 * sin(t * 0.07);
           vec3 hsv = rgb2hsv(ac);
           hsv.x = fract(hsv.x + u_view * hueOff);
           hsv.y = clamp(hsv.y * (1.0 + 0.08 * u_view), 0.0, 1.0);
@@ -260,20 +222,28 @@ void main() {
       tc += stepLen;
       fexp *= fmul;
     }
-    col += acc * stepLen * 29.0;   // grazing rays cross more shell = bright limb
+    // fade the aurora's reach into the deep sky: full brightness near
+    // the limb (lx → 0), zero by lx = 0.18. The curtain shape is
+    // animated so when curtains extend up they mask whole patches of
+    // stars and the user sees "groups appearing/disappearing" as the
+    // ribbons move. Containing the aurora to the limb keeps the upper
+    // sky a clean star field.
+    float skyFade = smoothstep(0.18, 0.02, lx);
+    col += acc * stepLen * 29.0 * skyFade;   // grazing rays cross more shell = bright limb
   }
 
   /* ---------- planet night side & sky, blended across the soft edge ---------- */
   col += vec3(0.004, 0.007, 0.011) * (1.0 - skyMask);
   if (skyMask > 0.0) {
-    // stars: two depths — a dense faint field plus sparse bright ones
-    vec2 sp = vec2(atan(rd.x, rd.z), rd.y);
-    vec3 st = starLayer(sp * 240.0, 0.962, t) * 0.55       // fine, dim field
-            + starLayer(sp * 95.0 + 31.7, 0.985, t) * 1.5; // sparse, brilliant
-    col += st * smoothstep(0.005, 0.05, lx) * skyMask;
+    // Stars are drawn in a separate GL_POINTS pass (see hero.js) over
+    // the real HYG catalog; no procedural starfield here.
     // crimson-magenta sky filling the space above the limb, like the
-    // reference: two tones blended by slow noise, fading with height
-    float wn = vnoise(vec2(rd.x, rd.y) * 4.0 - vec2(t * 0.05));
+    // reference: two tones blended by static noise, fading with height.
+    // The time-shift is intentionally removed — the noise cells are
+    // ~14° across, big enough that when they slide they brighten or
+    // dim wide patches of sky and the stars inside read as appearing
+    // and disappearing in groups.
+    float wn = vnoise(vec2(rd.x, rd.y) * 4.0);
     vec3 skyTone = mix(vec3(0.085, 0.004, 0.030),    // deep crimson
                        vec3(0.095, 0.006, 0.085),    // magenta
                        wn);

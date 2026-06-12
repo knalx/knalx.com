@@ -100,8 +100,251 @@
 
   gl.uniform1f(uMotion, reduced ? 0.0 : 1.0);
 
-  // resolution: cap DPR + adaptive `quality` for slower GPUs
-  let quality = 1.0;
+  /* ---------- catalog stars (GL_POINTS pass) ----------
+     Real HYG catalog rendered as point sprites. Each star is one
+     vertex; the vertex shader projects (RA, Dec) → world direction →
+     camera screen position with the same focal/pitch/roll as
+     makeRay(), and the fragment shader renders a NASA-orbital-style
+     splat (sharp core + tight halo + screen-aligned diffraction cross
+     on the brightest dozen stars) using gl_PointCoord. Drawn
+     additively after the aurora pass. */
+  const STAR_VS = `#version 300 es
+  precision highp float;
+  in vec4 a_star;          // (raDeg, decDeg, mag, bv)
+  uniform vec2  u_res;
+  uniform mat3  u_skyRot;
+  out float v_br;
+  out vec3  v_tint;
+  out float v_h3;
+  out float v_isBright;
+
+  void main() {
+    float ra  = radians(a_star.x);
+    float dec = radians(a_star.y);
+    float mag = a_star.z;
+    float bv  = a_star.w;
+
+    // celestial direction → world direction (transpose = inverse for
+    // an orthogonal rotation; u_skyRot maps world → catalog frame)
+    vec3 starDir = vec3(cos(dec) * cos(ra), sin(dec), cos(dec) * sin(ra));
+    vec3 wd = transpose(u_skyRot) * starDir;
+
+    // mirror makeRay's pitch/roll/focal exactly (yaw is 0)
+    const float pitch = 0.55;
+    const float roll  = -0.06;
+    const float focal = 1.35;
+
+    // undo pitch (rotateX by -pitch)
+    float cp = cos(pitch), sp = sin(pitch);
+    vec3 rdCam = vec3(
+      wd.x,
+      wd.y * cp + wd.z * sp,
+      -wd.y * sp + wd.z * cp
+    );
+    if (rdCam.z <= 0.001) { gl_Position = vec4(2, 2, 2, 1); return; }
+
+    // planet occlusion: skip stars whose ray-from-camera comes too
+    // close to the planet. Camera at (0, R+0.13, 0), R = 1. The
+    // discard margin grows with brightness because bright stars have
+    // bigger sprites — when their centre sits just above the limb the
+    // bottom half of the sprite would otherwise visibly cut into the
+    // dark planet surface.
+    vec3 camPos = vec3(0.0, 1.13, 0.0);
+    float dotcw = dot(camPos, wd);
+    if (dotcw < 0.0) {
+      float dmin2 = dot(camPos, camPos) - dotcw * dotcw;
+      // mag ≤ 0 → ~14% margin (~10° angular), mag ≥ 4 → ~4% (~5°).
+      // The base 4% is what hides the sprite *tail* of dim stars at
+      // the limb — without it the lower half of a 10-15 px sprite
+      // would peek into the dark planet area below the bright arc.
+      float occMargin = 0.04 + max(0.0, 4.0 - mag) * 0.025;
+      float occR = 1.0 + occMargin;
+      if (dmin2 < occR * occR) { gl_Position = vec4(2, 2, 2, 1); return; }
+    }
+
+    // project camera-space dir to the view plane, then undo roll
+    vec2 pp = rdCam.xy / rdCam.z * focal;
+    float cr = cos(roll), sr = sin(roll);
+    vec2 p = vec2(pp.x * cr + pp.y * sr, -pp.x * sr + pp.y * cr);
+
+    // p was originally formed via /u_res.y (height-normalised) → NDC
+    float aspect = u_res.x / u_res.y;
+    gl_Position = vec4(p.x * 2.0 / aspect, p.y * 2.0, 0.0, 1.0);
+
+    // brightness curve (linear-in-mag — perception is already log).
+    // Mapped so mag 0 ≈ 1.0 and mag 6.5 ≈ 0.10, the naked-eye limit
+    // we include in the catalogue. Floor at 0.08 keeps the dimmest
+    // catalog entries faintly visible without saturating to flat.
+    v_br = clamp(0.10 + (6.5 - mag) * 0.14, 0.08, 1.0);
+
+    // B-V color index → cool-to-warm RGB tint. Endpoints pushed
+    // further so the colour stamp on each star is unmistakable:
+    // hot stars are clearly blue, cool stars clearly orange-red.
+    float bvT = clamp((bv + 0.4) / 2.5, 0.0, 1.0);
+    v_tint = mix(vec3(0.30, 0.50, 1.00), vec3(1.00, 0.55, 0.25), bvT);
+
+    // per-star twinkle hash from (ra, dec)
+    v_h3 = fract(sin(dot(vec2(ra, dec), vec2(127.1, 311.7))) * 43758.5453);
+
+    // diffraction cross only on the ~12 brightest stars in the sky
+    // (mag ≤ 1.0 ≈ Sirius, Canopus, Arcturus, Vega, Capella, Rigel,
+    // Procyon, Achernar, Betelgeuse, Hadar, Altair, Aldebaran). All
+    // others render as clean dots, as in NASA orbital imagery.
+    v_isBright = step(mag, 1.0);
+
+    // larger sprites for brighter stars (browser caps PointSize, but
+    // anything below 64 is safe everywhere)
+    // NASA orbital-footage look: tight sprites, dim stars stay
+    // pinpoint, brights modest. Real cameras above the atmosphere
+    // don't bloom stars into big halos.
+    gl_PointSize = mix(4.0, 28.0, pow(v_br, 1.6));
+  }`;
+
+  const STAR_FS = `#version 300 es
+  precision highp float;
+  uniform float u_time;
+  in float v_br;
+  in vec3  v_tint;
+  in float v_h3;
+  in float v_isBright;
+  out vec4 fragColor;
+
+  void main() {
+    vec2 d = gl_PointCoord - vec2(0.5);
+    float r2 = dot(d, d);
+
+    // NASA orbital look: sharp white-hot core, tight modest halo,
+    // dead-still (no atmospheric scintillation).
+    float core = exp(-r2 * 600.0) * (1.0 + 9.0 * v_br);
+    float halo = exp(-r2 * 100.0) * pow(v_br, 2.0) * 0.7;
+
+    // diffraction cross — only on the dozen brightest stars, and
+    // tighter / dimmer than the photography-style version
+    float sp = 0.0;
+    if (v_isBright > 0.5) {
+      sp = (exp(-abs(d.x) * 16.0) * exp(-abs(d.y) * 100.0)
+          + exp(-abs(d.y) * 16.0) * exp(-abs(d.x) * 100.0))
+         * v_br * 0.35 * exp(-r2 * 18.0);
+    }
+
+    // No twinkle: from orbit there is no atmosphere to scintillate
+    // the light, so stars are perfectly steady in real space photos.
+    // Colour lives in the halo + cross; core stays mostly white-hot.
+    vec3 col = mix(vec3(1.0), v_tint, 0.15) * core
+             + v_tint * (halo + sp);
+    // tone map so additive blend with the already-tone-mapped aurora
+    // pass stays in the same dynamic range (bright stars don't burn
+    // a flat white square into the buffer)
+    col = 1.0 - exp(-col * 1.20);
+    fragColor = vec4(col, 1.0);
+  }`;
+
+  const starProg = (() => {
+    const v = compile(gl.VERTEX_SHADER, STAR_VS);
+    const f = compile(gl.FRAGMENT_SHADER, STAR_FS);
+    if (!v || !f) return null;
+    const p = gl.createProgram();
+    gl.attachShader(p, v);
+    gl.attachShader(p, f);
+    gl.bindAttribLocation(p, 0, "a_star");
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      console.warn("star program link error:", gl.getProgramInfoLog(p));
+      return null;
+    }
+    return p;
+  })();
+  const uStarRes = starProg && gl.getUniformLocation(starProg, "u_res");
+  const uStarSkyRot = starProg && gl.getUniformLocation(starProg, "u_skyRot");
+  const uStarTime = starProg && gl.getUniformLocation(starProg, "u_time");
+  let starVbo = null;
+  let starCount = 0;
+
+  // Sky orientation: place the celestial north pole (Polaris) in the
+  // upper part of the visible sky patch above the limb. The catalog
+  // uses starDir = (cos(Dec)cos(RA), sin(Dec), cos(Dec)sin(RA)), so
+  // its polar axis is +y. Build a rotation R = transpose(u_skyRot)
+  // that maps catalog (0, 1, 0) → a world direction lying inside the
+  // camera's visible cone. With the camera pitched down by 0.55 rad
+  // and an FOV-y of about 40°, we aim Polaris at screen position
+  // p ≈ (0, 0.5) — top centre of the patch. Constellations near
+  // Polaris (Ursa Minor, parts of Ursa Major and Cassiopeia) then sit
+  // around it in the natural sky orientation.
+  function buildSkyRot() {
+    const pitch = 0.55;
+    const cp = Math.cos(pitch),
+      sp = Math.sin(pitch);
+    // target Polaris screen position
+    const py = 0.5,
+      pz = 1.35;
+    const len = Math.hypot(py, pz);
+    const vy = py / len,
+      vz = pz / len; // camera-frame direction for Polaris
+    // rotate back through pitch to get world direction
+    const wpy = vy * cp - vz * sp;
+    const wpz = vy * sp + vz * cp;
+    // R columns: col 0 keeps catalog +x at world +x, col 1 is the
+    // world direction of Polaris, col 2 = col0 × col1
+    const c0x = 1,
+      c0y = 0,
+      c0z = 0;
+    const c1x = 0,
+      c1y = wpy,
+      c1z = wpz;
+    const c2x = c0y * c1z - c0z * c1y;
+    const c2y = c0z * c1x - c0x * c1z;
+    const c2z = c0x * c1y - c0y * c1x;
+    // u_skyRot = transpose(R); columns of u_skyRot = rows of R
+    return new Float32Array([
+      c0x, c1x, c2x,
+      c0y, c1y, c2y,
+      c0z, c1z, c2z,
+    ]);
+  }
+  const skyRotMat = buildSkyRot();
+
+  async function loadStarCatalog() {
+    if (!starProg) return;
+    let buf;
+    try {
+      const res = await fetch("/stars.bin", { cache: "force-cache" });
+      if (!res.ok) throw new Error(`stars.bin: ${res.status}`);
+      buf = await res.arrayBuffer();
+    } catch (e) {
+      console.warn("star catalog unavailable, using procedural fallback", e);
+      return;
+    }
+    const view = new DataView(buf);
+    const n = (buf.byteLength / 8) | 0;
+    const data = new Float32Array(n * 4);
+    function unq(raw, lo, hi) {
+      return lo + (raw / 65535) * (hi - lo);
+    }
+    for (let i = 0; i < n; i++) {
+      data[i * 4 + 0] = unq(view.getUint16(i * 8 + 0, true), 0, 360); // RA deg
+      data[i * 4 + 1] = unq(view.getUint16(i * 8 + 2, true), -90, 90); // Dec
+      data[i * 4 + 2] = unq(view.getUint16(i * 8 + 4, true), -2, 6); // mag
+      data[i * 4 + 3] = unq(view.getUint16(i * 8 + 6, true), -0.5, 2.5); // BV
+    }
+    starVbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, starVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    starCount = n;
+    // restore ARRAY_BUFFER + attrib config so the aurora pass on the
+    // very next frame reads from `buf` (fullscreen triangle), not from
+    // the freshly-uploaded starVbo
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    forceDraw = true;
+  }
+  loadStarCatalog();
+
+  // resolution: cap DPR at 1.75. Quality stays at 1.0 — the previous
+  // adaptive governor would resize the canvas every 2.5s when frame
+  // time sat near the threshold, and each resize shifted the procedural
+  // star cells' sub-pixel positions, making stars blink between two
+  // alternating states. Modern hardware handles 1.0 fine.
+  const quality = 1.0;
   let forceDraw = true;
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 1.75) * quality;
@@ -253,15 +496,6 @@
 
   const t0 = performance.now();
   let prev = t0;
-  let emaDt = 1 / 60;
-  let lastQChange = 0;
-  // smoothness comes from LOCKING to the display refresh rate, not raw fps.
-  // Estimate the refresh once warmed up, then trade resolution until locked.
-  let refresh = 60;
-  let rateSamples = [];
-  let qCeil = 1.0;
-  let lastUp = 0;
-  let ceilSetAt = 0;
 
   let lastRox = 1e9;
   let lastRoy = 1e9;
@@ -271,46 +505,6 @@
     if (!running) return;
     const dt = Math.min((now - prev) / 1000, 0.05);
     prev = now;
-
-    if (rateSamples !== null && now - t0 > 1500) {
-      rateSamples.push(dt);
-      if (rateSamples.length >= 40) {
-        rateSamples.sort((a, b) => a - b);
-        const est = 1 / rateSamples[2]; // 3rd-fastest: outlier-proof
-        const rates = [60, 75, 90, 120, 144, 165, 240];
-        refresh = rates.reduce(
-          (b, r) => (Math.abs(r - est) < Math.abs(b - est) ? r : b),
-          60,
-        );
-        if (est < 54) refresh = 60;
-        rateSamples = null;
-      }
-    }
-
-    emaDt += (dt - emaDt) * 0.05;
-    const scrolling = now - lastWheel < 1200;
-    if (now - t0 > 2000 && now - lastQChange > 2500 && rateSamples === null) {
-      if (emaDt > 1 / (0.92 * refresh) && quality > 0.45 && !scrolling) {
-        if (now - lastUp < 8000) {
-          qCeil = quality;
-          ceilSetAt = now;
-        }
-        quality *= 0.85;
-        lastQChange = now;
-        emaDt = 1 / refresh;
-        resize();
-      } else if (emaDt < 1 / (0.97 * refresh)) {
-        if (now - ceilSetAt > 60000) qCeil = 1.0;
-        const next = Math.min(quality / 0.85, 1.0);
-        if (next <= qCeil + 1e-3 && next > quality) {
-          quality = next;
-          lastUp = now;
-          lastQChange = now;
-          emaDt = 1 / refresh;
-          resize();
-        }
-      }
-    }
 
     // apply the coalesced drag delta — once per frame, not per event
     if (dragging && (curX !== lastX || curY !== lastY)) {
@@ -375,11 +569,31 @@
         : 0;
       const viewK = 1 - Math.exp(-dt * 2.5);
       viewLevel += (viewTarget - viewLevel) * viewK;
-      gl.uniform1f(uTime, reduced ? 40.0 : ((now - t0) / 1000) % 5120);
+      const tNow = reduced ? 40.0 : ((now - t0) / 1000) % 5120;
+      gl.uniform1f(uTime, tNow);
       gl.uniform2f(uOrbit, rox, roy);
       gl.uniform1f(uDetail, detail);
       gl.uniform1f(uView, viewLevel);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      // catalog stars (GL_POINTS, additive on top of the aurora pass)
+      if (starVbo && starCount > 0) {
+        gl.useProgram(starProg);
+        gl.uniform2f(uStarRes, canvas.width, canvas.height);
+        gl.uniformMatrix3fv(uStarSkyRot, false, skyRotMat);
+        gl.uniform1f(uStarTime, tNow);
+        gl.bindBuffer(gl.ARRAY_BUFFER, starVbo);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE); // additive
+        gl.drawArrays(gl.POINTS, 0, starCount);
+        gl.disable(gl.BLEND);
+        // restore for next frame
+        gl.useProgram(prog);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      }
     }
     requestAnimationFrame(frame);
   }

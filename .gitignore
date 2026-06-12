@@ -1,1 +1,5 @@
 .DS_Store
+# HYG star catalog source (32 MB) — too big to ship; rebuild stars.bin
+# via scripts/build-star-catalog.py after downloading. URL is in the
+# script's docstring.
+scripts/hyg.csv
