@@ -16,7 +16,7 @@
 
   let FRAG;
   try {
-    const res = await fetch("/hero.frag", { cache: "no-cache" });
+    const res = await fetch("/hero.frag", { cache: "default" });
     if (!res.ok) throw new Error(`hero.frag: ${res.status}`);
     FRAG = await res.text();
   } catch (e) {
@@ -311,7 +311,7 @@
       if (!res.ok) throw new Error(`stars.bin: ${res.status}`);
       ab = await res.arrayBuffer();
     } catch (e) {
-      console.warn("star catalog unavailable, using procedural fallback", e);
+      console.warn("star catalog unavailable, stars skipped", e);
       return;
     }
     const view = new DataView(ab);
@@ -323,7 +323,7 @@
     for (let i = 0; i < n; i++) {
       data[i * 4 + 0] = unq(view.getUint16(i * 8 + 0, true), 0, 360); // RA deg
       data[i * 4 + 1] = unq(view.getUint16(i * 8 + 2, true), -90, 90); // Dec
-      data[i * 4 + 2] = unq(view.getUint16(i * 8 + 4, true), -2, 6); // mag
+      data[i * 4 + 2] = unq(view.getUint16(i * 8 + 4, true), -2, 6.5); // mag
       data[i * 4 + 3] = unq(view.getUint16(i * 8 + 6, true), -0.5, 2.5); // BV
     }
     starVbo = gl.createBuffer();

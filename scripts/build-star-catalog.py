@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Build public/stars.bin from a HYG CSV (https://astronexus.com/projects/hyg).
-Filters to visible magnitude <= 5.5, keeps RA / Dec / mag / B-V, and
+Filters to naked-eye magnitude <= 6.5, keeps RA / Dec / mag / B-V, and
 quantizes each field to a Uint16 — 8 bytes per star, ~14 KB total.
 
   curl -sL -o scripts/hyg.csv \\
@@ -53,7 +53,7 @@ def main() -> int:
                 (
                     q16(ra_hours * 15.0, 0.0, 360.0),
                     q16(dec, -90.0, 90.0),
-                    q16(mag, -2.0, 6.0),
+                    q16(mag, -2.0, 6.5),
                     q16(ci, -0.5, 2.5),
                 )
             )
