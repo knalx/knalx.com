@@ -303,6 +303,21 @@
   }
   const skyRotMat = buildSkyRot();
 
+  let running = true;
+  let looping = false;
+  let prev = 0;
+  // (re)start the rAF loop if it has parked itself. In reduced-motion
+  // mode the scene is static, so frame() stops scheduling once
+  // everything has settled (see its tail); any input that changes the
+  // scene must call wake() to resume drawing. In normal motion the loop
+  // never parks, so wake() is a no-op there.
+  function wake() {
+    if (looping || !running) return;
+    looping = true;
+    prev = performance.now();
+    requestAnimationFrame(frame);
+  }
+
   async function loadStarCatalog() {
     if (!starProg) return;
     let ab;
@@ -336,6 +351,7 @@
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     forceDraw = true;
+    wake();
   }
   loadStarCatalog();
 
@@ -357,6 +373,7 @@
       gl.viewport(0, 0, w, h);
       gl.uniform2f(uRes, w, h);
       forceDraw = true;
+      wake();
     }
   }
   let resizeT = 0;
@@ -401,6 +418,7 @@
     lastT = curT = e.timeStamp;
     velX = velY = 0;
     document.documentElement.style.cursor = "grabbing";
+    wake();
   });
   window.addEventListener(
     "pointermove",
@@ -441,13 +459,9 @@
   canvas.style.cursor = "grab";
   canvas.style.touchAction = "none";
 
-  let running = true;
   document.addEventListener("visibilitychange", () => {
     running = !document.hidden;
-    if (running) {
-      prev = performance.now();
-      requestAnimationFrame(frame);
-    }
+    if (running) wake();
   });
 
   // page scroll rotates the globe: scrolling down nudges orbY forward,
@@ -460,6 +474,7 @@
       const dy = window.scrollY - lastScroll;
       lastScroll = window.scrollY;
       orbY -= dy * 0.005;
+      wake();
     },
     { passive: true },
   );
@@ -471,6 +486,7 @@
     "wheel",
     () => {
       lastWheel = performance.now();
+      wake();
     },
     { passive: true },
   );
@@ -489,20 +505,24 @@
       new IntersectionObserver((es) => {
         if (es[0].isIntersecting) {
           document.body.classList.remove("is-rotating");
+          wake();
         }
       }).observe(aboutEl);
     }
   }
 
   const t0 = performance.now();
-  let prev = t0;
+  prev = t0;
 
   let lastRox = 1e9;
   let lastRoy = 1e9;
   let viewLevel = 0; // 0..1, eased toward 1 in view mode for palette shift
   let detail = 1.0;
   function frame(now) {
-    if (!running) return;
+    if (!running) {
+      looping = false;
+      return;
+    }
     const dt = Math.min((now - prev) / 1000, 0.05);
     prev = now;
 
@@ -595,7 +615,27 @@
         gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
       }
     }
-    requestAnimationFrame(frame);
+
+    // Normal motion always animates. Reduced motion is static, so park
+    // the loop once nothing is still in flight — drag, momentum, the
+    // follow-spring, detail/view easing — and let wake() resume it.
+    if (!reduced) {
+      requestAnimationFrame(frame);
+      return;
+    }
+    const viewTarget = document.body.classList.contains("is-rotating")
+      ? 1
+      : 0;
+    const settling =
+      dragging ||
+      Math.abs(velX) > 1e-3 ||
+      Math.abs(velY) > 1e-3 ||
+      Math.abs(orbX - rox) > 1e-4 ||
+      Math.abs(orbY - roy) > 1e-4 ||
+      Math.abs(detail - 1.0) > 1e-3 ||
+      Math.abs(viewLevel - viewTarget) > 1e-3;
+    if (settling) requestAnimationFrame(frame);
+    else looping = false;
   }
-  requestAnimationFrame(frame);
+  wake();
 })();
