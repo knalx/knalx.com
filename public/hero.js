@@ -128,7 +128,9 @@
     // during rotation their sub-pixel position shifts and they flicker.
     // The catalog runs to mag 6.5; culling everything fainter than this
     // cutoff removes the blinking swarm and keeps the recognizable sky.
-    const float STAR_MAG_CUTOFF = 5.0;
+    // Set to 5.5 for a denser field like the orbital reference — the soft
+    // glow core steadies faint sprites enough to keep flicker in check.
+    const float STAR_MAG_CUTOFF = 5.5;
     if (mag > STAR_MAG_CUTOFF) { gl_Position = vec4(2, 2, 2, 1); return; }
 
     // celestial direction → world direction (transpose = inverse for
@@ -211,7 +213,7 @@
     // Mapped so mag 0 ≈ 1.0 and mag 6.5 ≈ 0.10, the naked-eye limit
     // we include in the catalogue. Floor at 0.08 keeps the dimmest
     // catalog entries faintly visible without saturating to flat.
-    v_br = clamp(0.10 + (6.5 - mag) * 0.14, 0.08, 1.0) * occFade * edgeFade;
+    v_br = clamp(0.18 + (6.5 - mag) * 0.16, 0.12, 1.0) * occFade * edgeFade;
 
     // B-V color index → cool-to-warm RGB tint. Endpoints pushed
     // further so the colour stamp on each star is unmistakable:
@@ -220,11 +222,10 @@
     v_tint = mix(vec3(0.30, 0.50, 1.00), vec3(1.00, 0.55, 0.25), bvT);
 
     // larger sprites for brighter stars (browser caps PointSize, but
-    // anything below 64 is safe everywhere)
-    // NASA orbital-footage look: tight sprites, dim stars stay
-    // pinpoint, brights modest. Real cameras above the atmosphere
-    // don't bloom stars into big halos.
-    gl_PointSize = mix(2.5, 9.0, pow(v_br, 1.6)); // small flat pinpoints
+    // anything below 64 is safe everywhere). The fragment shader draws a
+    // tight core + soft halo, so brights need extra sprite pixels for the
+    // glow to bloom into while dim stars stay near-pinpoint.
+    gl_PointSize = mix(3.0, 13.0, pow(v_br, 1.4));
   }`;
 
   const STAR_FS = `#version 300 es
@@ -234,13 +235,15 @@
   out vec4 fragColor;
 
   void main() {
-    // flat star: a plain soft-edged round dot, no halo / cross / bloom —
-    // just points sitting on the sky surface. Additive blend (ONE,ONE),
-    // so we output colour × coverage.
-    float r = length(gl_PointCoord - vec2(0.5));
-    float cov = 1.0 - smoothstep(0.42, 0.5, r); // 1 inside, soft AA edge
-    vec3 col = mix(vec3(1.0), v_tint, 0.35);     // mostly white, faint tint
-    fragColor = vec4(col * v_br * cov, 1.0);
+    // photographic star: a tight bright core fading into a soft halo, the
+    // way a camera exposure from orbit records a point of light (no spike,
+    // no twinkle). Additive blend (ONE,ONE), so we output colour × luminance.
+    float d = length(gl_PointCoord - vec2(0.5)) * 2.0; // 0 centre → 1 edge
+    float core = 1.0 - smoothstep(0.0, 0.32, d);       // bright centre
+    float halo = exp(-d * 3.0) * 0.65;                 // soft falloff tail
+    float intensity = core + halo;
+    vec3 col = mix(vec3(1.0), v_tint, 0.4);            // mostly white, faint tint
+    fragColor = vec4(col * v_br * intensity, 1.0);
   }`;
 
   const starProg = (() => {
