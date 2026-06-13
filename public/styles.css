@@ -494,6 +494,22 @@ body.is-rotating .hero__cue {
     color: var(--fg-soft);
 }
 
+/* On phones, drop the dedicated year column and fold the range into the
+   content column to reclaim the empty left gutter. */
+@media (max-width: 600px) {
+    .timeline__item {
+        grid-template-columns: 1fr;
+        gap: 0.35rem;
+    }
+
+    .timeline__when {
+        padding-top: 0;
+        order: -1;
+        font-size: 0.8rem;
+        letter-spacing: 0.02em;
+    }
+}
+
 /* ---------- Project cards ---------- */
 .cards {
     list-style: none;
