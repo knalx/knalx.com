@@ -103,20 +103,20 @@
   /* ---------- catalog stars (GL_POINTS pass) ----------
      Real HYG catalog rendered as point sprites. Each star is one
      vertex; the vertex shader projects (RA, Dec) → world direction →
-     camera screen position with the same focal/pitch/roll as
-     makeRay(), and the fragment shader renders a NASA-orbital-style
-     splat (sharp core + tight halo + screen-aligned diffraction cross
-     on the brightest dozen stars) using gl_PointCoord. Drawn
-     additively after the aurora pass. */
+     camera screen position with the same focal/pitch/roll as makeRay(),
+     rotates the whole sphere with the globe (u_orbit), and fades stars
+     smoothly at the planet limb and frame edges. The fragment shader
+     draws a plain flat dot via gl_PointCoord. Drawn additively after
+     the aurora pass. The sphere is oriented so the Big Dipper (Ursa
+     Major) sits framed above the limb at startup (see buildSkyRot). */
   const STAR_VS = `#version 300 es
   precision highp float;
   in vec4 a_star;          // (raDeg, decDeg, mag, bv)
   uniform vec2  u_res;
   uniform mat3  u_skyRot;
+  uniform vec2  u_orbit;   // (rox, roy) — shared globe rotation
   out float v_br;
   out vec3  v_tint;
-  out float v_h3;
-  out float v_isBright;
 
   void main() {
     float ra  = radians(a_star.x);
@@ -124,10 +124,35 @@
     float mag = a_star.z;
     float bv  = a_star.w;
 
+    // hide the faintest stars: their sprites are only a few px wide, so
+    // during rotation their sub-pixel position shifts and they flicker.
+    // The catalog runs to mag 6.5; culling everything fainter than this
+    // cutoff removes the blinking swarm and keeps the recognizable sky.
+    const float STAR_MAG_CUTOFF = 5.0;
+    if (mag > STAR_MAG_CUTOFF) { gl_Position = vec4(2, 2, 2, 1); return; }
+
     // celestial direction → world direction (transpose = inverse for
     // an orthogonal rotation; u_skyRot maps world → catalog frame)
     vec3 starDir = vec3(cos(dec) * cos(ra), sin(dec), cos(dec) * sin(ra));
     vec3 wd = transpose(u_skyRot) * starDir;
+
+    // share the globe's motion: the aurora/surface scrolls by u_orbit
+    // under a fixed camera, so to move *with* it the celestial sphere
+    // rotates instead — orbital drift + scroll (u_orbit.y) pitches the
+    // sky about world-X, horizontal drag (u_orbit.x) yaws it about
+    // world-Y. ORBIT_SCALE = 2π/160 makes the orbit's 2560-unit wrap
+    // (see the JS frame loop) exactly 16 turns, so the field wraps
+    // seamlessly in lockstep with the aurora — no visible jump. The
+    // sign is negated so the sphere turns *with* the scrolling surface
+    // rather than against it (the aurora offsets its texture by +u_orbit,
+    // which slides features the opposite way a positive rotation would).
+    const float ORBIT_SCALE = -0.0392699082;
+    float ax = u_orbit.x * ORBIT_SCALE;
+    float ay = u_orbit.y * ORBIT_SCALE;
+    float cax = cos(ax), sax = sin(ax);
+    wd = vec3(wd.x * cax + wd.z * sax, wd.y, -wd.x * sax + wd.z * cax);
+    float cay = cos(ay), say = sin(ay);
+    wd = vec3(wd.x, wd.y * cay - wd.z * say, wd.y * say + wd.z * cay);
 
     // mirror makeRay's pitch/roll/focal exactly (yaw is 0)
     const float pitch = 0.55;
@@ -143,39 +168,50 @@
     );
     if (rdCam.z <= 0.001) { gl_Position = vec4(2, 2, 2, 1); return; }
 
-    // planet occlusion: skip stars whose ray-from-camera comes too
-    // close to the planet. Camera at (0, R+0.13, 0), R = 1. The
-    // discard margin grows with brightness because bright stars have
-    // bigger sprites — when their centre sits just above the limb the
-    // bottom half of the sprite would otherwise visibly cut into the
-    // dark planet surface.
+    // planet occlusion. Camera at (0, R+0.13, 0), R = 1. Rather than a
+    // hard cull at the limb — which makes a star pop out/in within one
+    // frame as the sky rotates — fade its brightness smoothly over a
+    // small band as it crosses the limb. occR is just above the planet
+    // radius; the star is fully hidden below it and fully lit a little
+    // above, with a soft ramp between so it dissolves rather than blinks.
+    float occFade = 1.0;
     vec3 camPos = vec3(0.0, 1.13, 0.0);
     float dotcw = dot(camPos, wd);
     if (dotcw < 0.0) {
-      float dmin2 = dot(camPos, camPos) - dotcw * dotcw;
-      // mag ≤ 0 → ~14% margin (~10° angular), mag ≥ 4 → ~4% (~5°).
-      // The base 4% is what hides the sprite *tail* of dim stars at
-      // the limb — without it the lower half of a 10-15 px sprite
-      // would peek into the dark planet area below the bright arc.
-      float occMargin = 0.04 + max(0.0, 4.0 - mag) * 0.025;
-      float occR = 1.0 + occMargin;
-      if (dmin2 < occR * occR) { gl_Position = vec4(2, 2, 2, 1); return; }
+      float dmin = sqrt(max(dot(camPos, camPos) - dotcw * dotcw, 0.0));
+      // fade sits just above the limb (R = 1): stars stay lit close to
+      // the horizon, then dissolve in a thin band before they reach the
+      // bright planet edge, so none bleed onto the surface.
+      float occR = 1.0 + 0.02;
+      occFade = smoothstep(occR, occR + 0.03, dmin);
+      if (occFade <= 0.0) { gl_Position = vec4(2, 2, 2, 1); return; }
     }
 
-    // project camera-space dir to the view plane, then undo roll
+    // project camera-space dir to the view plane, then undo roll.
+    // makeRay() rotates screen coords by R(-roll) to build its ray, so
+    // the world→screen inverse here must apply R(+roll). (The previous
+    // signs applied R(-roll), tilting the star field ~2·roll off the
+    // planet and misaligning the occlusion shadow.)
     vec2 pp = rdCam.xy / rdCam.z * focal;
     float cr = cos(roll), sr = sin(roll);
-    vec2 p = vec2(pp.x * cr + pp.y * sr, -pp.x * sr + pp.y * cr);
+    vec2 p = vec2(pp.x * cr - pp.y * sr, pp.x * sr + pp.y * cr);
 
     // p was originally formed via /u_res.y (height-normalised) → NDC
     float aspect = u_res.x / u_res.y;
-    gl_Position = vec4(p.x * 2.0 / aspect, p.y * 2.0, 0.0, 1.0);
+    vec2 ndc = vec2(p.x * 2.0 / aspect, p.y * 2.0);
+    gl_Position = vec4(ndc, 0.0, 1.0);
+
+    // edge fade: a GL_POINTS sprite is clipped the instant its centre
+    // crosses the NDC border, so without this a star blinks out at the
+    // frame edge. Ramp brightness to zero just before the border so it
+    // dims away instead of popping.
+    float edgeFade = 1.0 - smoothstep(0.88, 1.0, max(abs(ndc.x), abs(ndc.y)));
 
     // brightness curve (linear-in-mag — perception is already log).
     // Mapped so mag 0 ≈ 1.0 and mag 6.5 ≈ 0.10, the naked-eye limit
     // we include in the catalogue. Floor at 0.08 keeps the dimmest
     // catalog entries faintly visible without saturating to flat.
-    v_br = clamp(0.10 + (6.5 - mag) * 0.14, 0.08, 1.0);
+    v_br = clamp(0.10 + (6.5 - mag) * 0.14, 0.08, 1.0) * occFade * edgeFade;
 
     // B-V color index → cool-to-warm RGB tint. Endpoints pushed
     // further so the colour stamp on each star is unmistakable:
@@ -183,60 +219,28 @@
     float bvT = clamp((bv + 0.4) / 2.5, 0.0, 1.0);
     v_tint = mix(vec3(0.30, 0.50, 1.00), vec3(1.00, 0.55, 0.25), bvT);
 
-    // per-star twinkle hash from (ra, dec)
-    v_h3 = fract(sin(dot(vec2(ra, dec), vec2(127.1, 311.7))) * 43758.5453);
-
-    // diffraction cross only on the ~12 brightest stars in the sky
-    // (mag ≤ 1.0 ≈ Sirius, Canopus, Arcturus, Vega, Capella, Rigel,
-    // Procyon, Achernar, Betelgeuse, Hadar, Altair, Aldebaran). All
-    // others render as clean dots, as in NASA orbital imagery.
-    v_isBright = step(mag, 1.0);
-
     // larger sprites for brighter stars (browser caps PointSize, but
     // anything below 64 is safe everywhere)
     // NASA orbital-footage look: tight sprites, dim stars stay
     // pinpoint, brights modest. Real cameras above the atmosphere
     // don't bloom stars into big halos.
-    gl_PointSize = mix(4.0, 28.0, pow(v_br, 1.6));
+    gl_PointSize = mix(2.5, 9.0, pow(v_br, 1.6)); // small flat pinpoints
   }`;
 
   const STAR_FS = `#version 300 es
   precision highp float;
-  uniform float u_time;
   in float v_br;
   in vec3  v_tint;
-  in float v_h3;
-  in float v_isBright;
   out vec4 fragColor;
 
   void main() {
-    vec2 d = gl_PointCoord - vec2(0.5);
-    float r2 = dot(d, d);
-
-    // NASA orbital look: sharp white-hot core, tight modest halo,
-    // dead-still (no atmospheric scintillation).
-    float core = exp(-r2 * 600.0) * (1.0 + 9.0 * v_br);
-    float halo = exp(-r2 * 100.0) * pow(v_br, 2.0) * 0.7;
-
-    // diffraction cross — only on the dozen brightest stars, and
-    // tighter / dimmer than the photography-style version
-    float sp = 0.0;
-    if (v_isBright > 0.5) {
-      sp = (exp(-abs(d.x) * 16.0) * exp(-abs(d.y) * 100.0)
-          + exp(-abs(d.y) * 16.0) * exp(-abs(d.x) * 100.0))
-         * v_br * 0.35 * exp(-r2 * 18.0);
-    }
-
-    // No twinkle: from orbit there is no atmosphere to scintillate
-    // the light, so stars are perfectly steady in real space photos.
-    // Colour lives in the halo + cross; core stays mostly white-hot.
-    vec3 col = mix(vec3(1.0), v_tint, 0.15) * core
-             + v_tint * (halo + sp);
-    // tone map so additive blend with the already-tone-mapped aurora
-    // pass stays in the same dynamic range (bright stars don't burn
-    // a flat white square into the buffer)
-    col = 1.0 - exp(-col * 1.20);
-    fragColor = vec4(col, 1.0);
+    // flat star: a plain soft-edged round dot, no halo / cross / bloom —
+    // just points sitting on the sky surface. Additive blend (ONE,ONE),
+    // so we output colour × coverage.
+    float r = length(gl_PointCoord - vec2(0.5));
+    float cov = 1.0 - smoothstep(0.42, 0.5, r); // 1 inside, soft AA edge
+    vec3 col = mix(vec3(1.0), v_tint, 0.35);     // mostly white, faint tint
+    fragColor = vec4(col * v_br * cov, 1.0);
   }`;
 
   const starProg = (() => {
@@ -256,49 +260,27 @@
   })();
   const uStarRes = starProg && gl.getUniformLocation(starProg, "u_res");
   const uStarSkyRot = starProg && gl.getUniformLocation(starProg, "u_skyRot");
-  const uStarTime = starProg && gl.getUniformLocation(starProg, "u_time");
+  const uStarOrbit = starProg && gl.getUniformLocation(starProg, "u_orbit");
   let starVbo = null;
   let starCount = 0;
 
-  // Sky orientation: place the celestial north pole (Polaris) in the
-  // upper part of the visible sky patch above the limb. The catalog
-  // uses starDir = (cos(Dec)cos(RA), sin(Dec), cos(Dec)sin(RA)), so
-  // its polar axis is +y. Build a rotation R = transpose(u_skyRot)
-  // that maps catalog (0, 1, 0) → a world direction lying inside the
-  // camera's visible cone. With the camera pitched down by 0.55 rad
-  // and an FOV-y of about 40°, we aim Polaris at screen position
-  // p ≈ (0, 0.5) — top centre of the patch. Constellations near
-  // Polaris (Ursa Minor, parts of Ursa Major and Cassiopeia) then sit
-  // around it in the natural sky orientation.
+  // Sky orientation: frame the Big Dipper (Ursa Major) horizontally in
+  // the thin sky band above the limb at startup. The catalog uses
+  // starDir = (cos(Dec)cos(RA), sin(Dec), cos(Dec)sin(RA)); u_skyRot is
+  // transpose(R) where R maps catalog → world. Because the camera looks
+  // down (pitch 0.55), only a ~15°×67° strip of sky is visible and
+  // unoccluded, and the projection stretches hard near the top — so the
+  // pole region and Ursa Minor can't share the frame with the Dipper.
+  // This matrix was solved numerically to seat the seven Dipper stars
+  // (Dubhe→Alkaid) centred and roughly level in that band; see
+  // scripts/ for the solver. Stars rotate from here via u_orbit (drift
+  // + drag), so this is just the initial pose.
   function buildSkyRot() {
-    const pitch = 0.55;
-    const cp = Math.cos(pitch),
-      sp = Math.sin(pitch);
-    // target Polaris screen position
-    const py = 0.5,
-      pz = 1.35;
-    const len = Math.hypot(py, pz);
-    const vy = py / len,
-      vz = pz / len; // camera-frame direction for Polaris
-    // rotate back through pitch to get world direction
-    const wpy = vy * cp - vz * sp;
-    const wpz = vy * sp + vz * cp;
-    // R columns: col 0 keeps catalog +x at world +x, col 1 is the
-    // world direction of Polaris, col 2 = col0 × col1
-    const c0x = 1,
-      c0y = 0,
-      c0z = 0;
-    const c1x = 0,
-      c1y = wpy,
-      c1z = wpz;
-    const c2x = c0y * c1z - c0z * c1y;
-    const c2y = c0z * c1x - c0x * c1z;
-    const c2z = c0x * c1y - c0y * c1x;
-    // u_skyRot = transpose(R); columns of u_skyRot = rows of R
+    // column-major u_skyRot = transpose(R)
     return new Float32Array([
-      c0x, c1x, c2x,
-      c0y, c1y, c2y,
-      c0z, c1z, c2z,
+      -0.016374, 0.404540, 0.914374,
+      0.966463, 0.240797, -0.089246,
+      -0.256283, 0.882248, -0.394912,
     ]);
   }
   const skyRotMat = buildSkyRot();
@@ -601,7 +583,7 @@
         gl.useProgram(starProg);
         gl.uniform2f(uStarRes, canvas.width, canvas.height);
         gl.uniformMatrix3fv(uStarSkyRot, false, skyRotMat);
-        gl.uniform1f(uStarTime, tNow);
+        gl.uniform2f(uStarOrbit, rox, roy);
         gl.bindBuffer(gl.ARRAY_BUFFER, starVbo);
         gl.enableVertexAttribArray(0);
         gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
