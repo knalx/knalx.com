@@ -10,6 +10,19 @@
     return;
   }
 
+  // The hero <h1> is the LCP element. Shader compile + link below is a
+  // ~800ms synchronous main-thread block, and because hero.frag comes from
+  // cache its continuation runs before the browser's first paint — so the
+  // title can't show until the GL scene is built. Yield until after the
+  // first paint so the text lands immediately and the aurora fills in next.
+  await new Promise((resolve) => {
+    if ("requestIdleCallback" in window) {
+      requestIdleCallback(() => resolve(), { timeout: 200 });
+    } else {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    }
+  });
+
   const VERT = `#version 300 es
   in vec2 a_pos;
   void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
