@@ -611,13 +611,6 @@ body.is-rotating .hero__cue {
     transform: translate(2px, -2px);
 }
 
-.aurora-credit {
-    margin: 2.5rem 0 0;
-    color: var(--fg-mute);
-    font-size: 0.85rem;
-    letter-spacing: 0.02em;
-}
-
 /* ---------- Footer ---------- */
 .site-footer {
     position: relative;
